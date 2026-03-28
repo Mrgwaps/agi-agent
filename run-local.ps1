@@ -50,8 +50,10 @@ $ErrorActionPreference = "Stop"
 
 # ---------------------------------------------------------------------------
 # Paths  (all data goes to the drive where this script lives)
+# $PSScriptRoot is always the directory containing the .ps1 file, regardless
+# of where the caller's working directory is or how the path was specified.
 # ---------------------------------------------------------------------------
-$Script:ROOT      = Split-Path -Parent $MyInvocation.PSCommandPath
+$Script:ROOT      = $PSScriptRoot
 $Script:BACKEND   = Join-Path $Script:ROOT "backend"
 $Script:FRONTEND  = Join-Path $Script:ROOT "frontend"
 $Script:VENV      = Join-Path $Script:BACKEND ".venv"
