@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
@@ -25,21 +26,80 @@ def _approval_key(task_id: str) -> str:
     return f"agi:approval:{task_id}"
 
 
+class _InMemoryStore:
+    """Lightweight in-process fallback used when Redis is unavailable."""
+
+    def __init__(self) -> None:
+        self._kv: Dict[str, str] = {}
+        self._lists: Dict[str, List[str]] = defaultdict(list)
+
+    async def set(self, key: str, value: str, ex: int = 0) -> None:
+        self._kv[key] = value
+
+    async def get(self, key: str) -> Optional[str]:
+        return self._kv.get(key)
+
+    async def delete(self, *keys: str) -> None:
+        for k in keys:
+            self._kv.pop(k, None)
+            self._lists.pop(k, None)
+
+    async def rpush(self, key: str, value: str) -> None:
+        self._lists[key].append(value)
+
+    async def expire(self, key: str, seconds: int) -> None:
+        pass  # no TTL enforcement in fallback
+
+    async def lrange(self, key: str, start: int, end: int) -> List[str]:
+        items = self._lists.get(key, [])
+        return items[start: None if end == -1 else end + 1]
+
+    async def keys(self, pattern: str) -> List[str]:
+        prefix = pattern.rstrip("*")
+        return [k for k in list(self._kv.keys()) + list(self._lists.keys()) if k.startswith(prefix)]
+
+    async def aclose(self) -> None:
+        pass
+
+
 class SessionMemory:
-    """Redis-backed session store for task state and events."""
+    """Redis-backed session store with automatic in-memory fallback for local mode."""
 
     def __init__(self) -> None:
         self._client: Optional[Any] = None
+        self._use_fallback: bool = False
 
     async def _get_client(self) -> Any:
-        if self._client is None:
-            import redis.asyncio as aioredis
+        if self._use_fallback:
+            if self._client is None:
+                self._client = _InMemoryStore()
+            return self._client
 
-            self._client = aioredis.from_url(
-                settings.redis_url,
-                encoding="utf-8",
-                decode_responses=True,
-            )
+        if self._client is None:
+            # Skip Redis entirely if no URL configured or local mode
+            if not settings.redis_url or settings.redis_url in ("", "none", "disabled"):
+                logger.info("SessionMemory: Redis disabled — using in-memory store")
+                self._use_fallback = True
+                self._client = _InMemoryStore()
+                return self._client
+            try:
+                import redis.asyncio as aioredis
+
+                client = aioredis.from_url(
+                    settings.redis_url,
+                    encoding="utf-8",
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                )
+                await client.ping()
+                self._client = client
+                logger.info("SessionMemory: connected to Redis")
+            except Exception as exc:
+                logger.warning(
+                    "SessionMemory: Redis unavailable (%s) — falling back to in-memory store", exc
+                )
+                self._use_fallback = True
+                self._client = _InMemoryStore()
         return self._client
 
     # ── Task state ───────────────────────────────────────────────────────────
