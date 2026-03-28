@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.local
+.env.production
+.env.staging
+*.local
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+
+# Logs
+*.log
+deploy.log
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Artifacts
+artifacts/
+workspace/
+
+# Secrets
+*.pem
+*.key
+*.crt
+secrets/
