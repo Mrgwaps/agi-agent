@@ -5,36 +5,40 @@
 
 .DESCRIPTION
     Starts the AGI Agent backend and frontend locally without Docker.
-    Uses SQLite for storage and in-memory fallback for Redis — zero
-    external services required. Just Python 3.11+ and Node.js 18+.
+    Uses SQLite + in-memory fallback - zero external services needed.
+    Requires Python 3.11+ and Node 18+ to be in PATH (can live on any drive).
+    All data files (venv, SQLite, logs, workspace) are stored on the drive
+    where this script lives, keeping your system drive free.
 
 .PARAMETER Action
-    start  | stop | restart | status | logs-backend | logs-frontend | open
+    start | stop | restart | status | logs-backend | logs-frontend | open | install
 
 .PARAMETER SkipInstall
-    Skip dependency installation (faster startup if already installed)
+    Skip dependency installation (faster restart if deps already installed)
 
 .PARAMETER BackendOnly
-    Start only the FastAPI backend
+    Start only the FastAPI backend (port 8000)
 
 .PARAMETER FrontendOnly
-    Start only the Next.js frontend
+    Start only the Next.js frontend (port 3000)
 
 .EXAMPLE
-    .\run-local.ps1                        # First-time setup + start everything
-    .\run-local.ps1 -Action start          # Start all services
-    .\run-local.ps1 -Action stop           # Stop all services
-    .\run-local.ps1 -Action status         # Check what's running
-    .\run-local.ps1 -SkipInstall           # Start without reinstalling deps
-    .\run-local.ps1 -BackendOnly           # API server only
+    .\run-local.ps1                         # First-time setup + start everything
+    .\run-local.ps1 -Action stop            # Stop all services
+    .\run-local.ps1 -Action status          # Check running ports
+    .\run-local.ps1 -SkipInstall            # Fast restart (deps already installed)
+    .\run-local.ps1 -BackendOnly            # API only, no UI
+    .\run-local.ps1 -Action logs-backend    # Tail backend log
 
 .NOTES
-    Ports: Backend=8000  Frontend=3000
+    Ports  : Backend=8000  Frontend=3000
+    Data   : Stored next to this script (SQLite, venv, logs)
+    Python : Looked up via PATH - install location does not matter
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet("start", "stop", "restart", "status", "logs-backend", "logs-frontend", "open", "install")]
+    [ValidateSet("start","stop","restart","status","logs-backend","logs-frontend","open","install")]
     [string]$Action = "start",
     [switch]$SkipInstall,
     [switch]$BackendOnly,
@@ -44,148 +48,266 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-$Script:ROOT       = Split-Path -Parent $MyInvocation.PSCommandPath
-$Script:BACKEND    = Join-Path $Script:ROOT "backend"
-$Script:FRONTEND   = Join-Path $Script:ROOT "frontend"
-$Script:VENV       = Join-Path $Script:BACKEND ".venv"
-$Script:PID_FILE   = Join-Path $Script:ROOT ".local-pids"
-$Script:LOG_DIR    = Join-Path $Script:ROOT ".local-logs"
-$Script:BE_LOG     = Join-Path $Script:LOG_DIR "backend.log"
-$Script:FE_LOG     = Join-Path $Script:LOG_DIR "frontend.log"
+# ---------------------------------------------------------------------------
+# Paths  (all data goes to the drive where this script lives)
+# ---------------------------------------------------------------------------
+$Script:ROOT      = Split-Path -Parent $MyInvocation.PSCommandPath
+$Script:BACKEND   = Join-Path $Script:ROOT "backend"
+$Script:FRONTEND  = Join-Path $Script:ROOT "frontend"
+$Script:VENV      = Join-Path $Script:BACKEND ".venv"
+$Script:LOG_DIR   = Join-Path $Script:ROOT ".local-logs"
+$Script:BE_LOG    = Join-Path $Script:LOG_DIR "backend.log"
+$Script:FE_LOG    = Join-Path $Script:LOG_DIR "frontend.log"
+$Script:BE_PID    = Join-Path $Script:ROOT ".be.pid"
+$Script:FE_PID    = Join-Path $Script:ROOT ".fe.pid"
 
-# ── Colors ────────────────────────────────────────────────────────────────────
-$Script:ColorOK    = if ($Host.UI.SupportsVirtualTerminal) { "`e[92m" } else { "" }
-$Script:ColorWarn  = if ($Host.UI.SupportsVirtualTerminal) { "`e[93m" } else { "" }
-$Script:ColorErr   = if ($Host.UI.SupportsVirtualTerminal) { "`e[91m" } else { "" }
-$Script:ColorInfo  = if ($Host.UI.SupportsVirtualTerminal) { "`e[96m" } else { "" }
-$Script:ColorDim   = if ($Host.UI.SupportsVirtualTerminal) { "`e[2m"  } else { "" }
-$Script:ColorBold  = if ($Host.UI.SupportsVirtualTerminal) { "`e[1m"  } else { "" }
-$Script:ColorReset = if ($Host.UI.SupportsVirtualTerminal) { "`e[0m"  } else { "" }
-$Script:ColorPurp  = if ($Host.UI.SupportsVirtualTerminal) { "`e[95m" } else { "" }
+# ---------------------------------------------------------------------------
+# Colors  (use [char]27 for ESC - works on PowerShell 5.1 and 7+)
+# ---------------------------------------------------------------------------
+$ESC = [char]27
+if ($Host.UI.SupportsVirtualTerminal) {
+    $CG = "$ESC[92m"   # green
+    $CY = "$ESC[93m"   # yellow
+    $CR = "$ESC[91m"   # red
+    $CC = "$ESC[96m"   # cyan
+    $CM = "$ESC[95m"   # magenta
+    $CD = "$ESC[2m"    # dim
+    $CB = "$ESC[1m"    # bold
+    $CX = "$ESC[0m"    # reset
+} else {
+    $CG = ""; $CY = ""; $CR = ""; $CC = ""; $CM = ""; $CD = ""; $CB = ""; $CX = ""
+}
 
-function ok   { param([string]$m) Write-Host "  $($Script:ColorOK)✔$($Script:ColorReset) $m" }
-function warn { param([string]$m) Write-Host "  $($Script:ColorWarn)⚠$($Script:ColorReset) $m" }
-function err  { param([string]$m) Write-Host "  $($Script:ColorErr)✖$($Script:ColorReset) $m" }
-function info { param([string]$m) Write-Host "  $($Script:ColorInfo)›$($Script:ColorReset) $m" }
-function dim  { param([string]$m) Write-Host "  $($Script:ColorDim)$m$($Script:ColorReset)" }
-function section { param([string]$t) Write-Host ""; Write-Host "$($Script:ColorBold)$($Script:ColorPurp)  ▸ $t$($Script:ColorReset)"; Write-Host "$($Script:ColorDim)  $('─' * 50)$($Script:ColorReset)" }
+function ok      { param([string]$m) Write-Host "  $($CG)OK$($CX)  $m" }
+function warn    { param([string]$m) Write-Host "  $($CY)>>$($CX)  $m" }
+function err     { param([string]$m) Write-Host "  $($CR)!!$($CX)  $m" }
+function info    { param([string]$m) Write-Host "  $($CC)->$($CX)  $m" }
+function dim     { param([string]$m) Write-Host "  $($CD)$m$($CX)" }
+function section {
+    param([string]$t)
+    Write-Host ""
+    Write-Host "$($CB)$($CM)  >> $t$($CX)"
+    Write-Host "$($CD)  $('-' * 52)$($CX)"
+}
 
 function Write-Banner {
     Write-Host ""
-    Write-Host "$($Script:ColorPurp)$($Script:ColorBold)  ╔════════════════════════════════════════════╗$($Script:ColorReset)"
-    Write-Host "$($Script:ColorPurp)$($Script:ColorBold)  ║$($Script:ColorReset)$($Script:ColorBold)     AGI Agent · Local Dev Launcher         $($Script:ColorPurp)║$($Script:ColorReset)"
-    Write-Host "$($Script:ColorPurp)$($Script:ColorBold)  ║$($Script:ColorReset)$($Script:ColorDim)     No Docker · SQLite · In-Memory Redis    $($Script:ColorPurp)$($Script:ColorBold)║$($Script:ColorReset)"
-    Write-Host "$($Script:ColorPurp)$($Script:ColorBold)  ╚════════════════════════════════════════════╝$($Script:ColorReset)"
+    Write-Host "$($CM)$($CB)  +------------------------------------------+$($CX)"
+    Write-Host "$($CM)$($CB)  |$($CX)$($CB)   AGI Agent  -  Local Dev Launcher      $($CM)|$($CX)"
+    Write-Host "$($CM)$($CB)  |$($CX)$($CD)   No Docker | SQLite | In-Memory Redis  $($CM)$($CB)|$($CX)"
+    Write-Host "$($CM)$($CB)  +------------------------------------------+$($CX)"
+    Write-Host ""
+    dim "  Script root : $($Script:ROOT)"
+    dim "  Backend     : $($Script:BACKEND)"
+    dim "  Frontend    : $($Script:FRONTEND)"
     Write-Host ""
 }
 
-# ── Prerequisite checks ───────────────────────────────────────────────────────
-function Test-Prerequisites {
-    section "Checking Prerequisites"
-    $ok = $true
-
-    # Python
-    try {
-        $pyVer = python --version 2>&1
-        if ($pyVer -match "Python (\d+)\.(\d+)") {
-            $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-            if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 11)) {
-                warn "Python $major.$minor found — 3.11+ recommended"
-            } else {
-                ok "Python $major.$minor"
-            }
-        }
-    } catch {
-        err "Python not found. Install from https://python.org (3.11+)"
-        $ok = $false
-    }
-
-    # Node
-    if (-not $BackendOnly) {
+# ---------------------------------------------------------------------------
+# Find Python / Node on PATH (works regardless of install drive)
+# ---------------------------------------------------------------------------
+function Get-PythonExe {
+    foreach ($cmd in @("python", "python3", "py")) {
         try {
-            $nodeVer = node --version 2>&1
-            if ($nodeVer -match "v(\d+)") {
-                $major = [int]$Matches[1]
-                if ($major -lt 18) { warn "Node $nodeVer found — v18+ recommended" }
-                else { ok "Node $nodeVer" }
-            }
-        } catch {
-            err "Node.js not found. Install from https://nodejs.org (v18+)"
-            $ok = $false
-        }
+            $out = & $cmd --version 2>&1
+            if ($out -match "Python \d") { return $cmd }
+        } catch {}
     }
-
-    return $ok
+    return $null
 }
 
-# ── Environment setup ─────────────────────────────────────────────────────────
+function Get-NodeExe {
+    try {
+        $out = node --version 2>&1
+        if ($out -match "v\d") { return "node" }
+    } catch {}
+    return $null
+}
+
+function Get-VenvPython {
+    $candidates = @(
+        (Join-Path $Script:VENV "Scripts\python.exe"),
+        (Join-Path $Script:VENV "Scripts\python"),
+        (Join-Path $Script:VENV "bin\python")
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
+function Get-VenvPip {
+    $candidates = @(
+        (Join-Path $Script:VENV "Scripts\pip.exe"),
+        (Join-Path $Script:VENV "Scripts\pip"),
+        (Join-Path $Script:VENV "bin\pip")
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
+function Get-VenvUvicorn {
+    $candidates = @(
+        (Join-Path $Script:VENV "Scripts\uvicorn.exe"),
+        (Join-Path $Script:VENV "Scripts\uvicorn"),
+        (Join-Path $Script:VENV "bin\uvicorn")
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    # Fallback: run via python -m uvicorn
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+function Test-Prerequisites {
+    section "Checking Prerequisites"
+    $allOk = $true
+
+    # Python
+    $pyCmd = Get-PythonExe
+    if ($null -eq $pyCmd) {
+        err "Python not found in PATH."
+        info "Install Python 3.11+ from https://www.python.org/downloads/"
+        info "Make sure to check 'Add Python to PATH' during install."
+        $allOk = $false
+    } else {
+        try {
+            $pyVerRaw = & $pyCmd --version 2>&1
+            if ($pyVerRaw -match "Python (\d+)\.(\d+)") {
+                $pyMaj = [int]$Matches[1]
+                $pyMin = [int]$Matches[2]
+                $pyStr = "$($pyMaj).$($pyMin)"
+                if ($pyMaj -lt 3 -or ($pyMaj -eq 3 -and $pyMin -lt 11)) {
+                    warn "Python $pyStr found - version 3.11 or higher is recommended"
+                } else {
+                    ok "Python $pyStr  ($pyCmd)"
+                }
+            }
+        } catch {
+            warn "Could not read Python version: $_"
+        }
+    }
+
+    # Node (only needed if not BackendOnly)
+    if (-not $BackendOnly) {
+        $nodeCmd = Get-NodeExe
+        if ($null -eq $nodeCmd) {
+            err "Node.js not found in PATH."
+            info "Install Node.js 18+ from https://nodejs.org/"
+            info "The installer adds Node to PATH automatically."
+            $allOk = $false
+        } else {
+            try {
+                $nodeVer = node --version 2>&1
+                if ($nodeVer -match "v(\d+)") {
+                    $nodeMaj = [int]$Matches[1]
+                    if ($nodeMaj -lt 18) {
+                        warn "Node $nodeVer found - v18 or higher is recommended"
+                    } else {
+                        ok "Node $nodeVer"
+                    }
+                }
+            } catch {
+                warn "Could not read Node version: $_"
+            }
+        }
+    }
+
+    # Show where data will live
+    Write-Host ""
+    info "All data will be stored on: $($Script:ROOT)"
+    dim "  Virtual env  -> $($Script:VENV)"
+    dim "  SQLite DB    -> $($Script:BACKEND)\agi_memory.db"
+    dim "  Logs         -> $($Script:LOG_DIR)"
+    dim "  Workspace    -> $($Script:BACKEND)\agi_workspace"
+
+    return $allOk
+}
+
+# ---------------------------------------------------------------------------
+# Environment / .env setup
+# ---------------------------------------------------------------------------
 function Initialize-Environment {
     section "Environment Setup"
 
-    $envFile = Join-Path $Script:BACKEND ".env"
+    $envFile    = Join-Path $Script:BACKEND ".env"
     $envExample = Join-Path $Script:ROOT ".env.local.example"
 
     if (-not (Test-Path $envFile)) {
         if (Test-Path $envExample) {
             Copy-Item $envExample $envFile
-            ok "Created backend/.env from .env.local.example"
+            ok "Created backend\.env from .env.local.example"
         } else {
-            warn "No .env found — backend will use defaults"
+            warn "No .env file found - backend will use built-in defaults"
             return
         }
     } else {
-        ok "backend/.env already exists"
+        ok "backend\.env already exists"
     }
 
-    # Check for OpenRouter key
+    # Warn if OpenRouter key is still the placeholder
     $content = Get-Content $envFile -Raw
-    if ($content -match "OPENROUTER_API_KEY=sk-or-v1-your-key-here" -or
-        $content -notmatch "OPENROUTER_API_KEY=sk-or-") {
+    $hasRealKey = $content -match "OPENROUTER_API_KEY=sk-or-v1-[A-Za-z0-9]"
+    $hasPlaceholder = $content -match "OPENROUTER_API_KEY=sk-or-v1-your-key-here"
+
+    if (-not $hasRealKey -or $hasPlaceholder) {
         Write-Host ""
-        warn "OPENROUTER_API_KEY is not set in backend/.env"
-        info "Get a free key at: $($Script:ColorInfo)https://openrouter.ai/keys$($Script:ColorReset)"
-        info "Free models available — no payment needed to start!"
+        warn "OPENROUTER_API_KEY is not set in backend\.env"
+        info "Get a free key at: https://openrouter.ai/keys"
+        info "Free models are used by default - no payment required to start."
         Write-Host ""
-        $edit = Read-Host "  Open backend/.env in editor now? [Y/n]"
+        $edit = Read-Host "  Open backend\.env in Notepad now? [Y/n]"
         if ($edit -ne "n" -and $edit -ne "N") {
-            if (Get-Command "code" -ErrorAction SilentlyContinue) { code $envFile }
-            elseif (Get-Command "notepad" -ErrorAction SilentlyContinue) { Start-Process notepad $envFile -Wait }
+            Start-Process notepad (Join-Path $Script:BACKEND ".env") -Wait
         }
     }
 }
 
-# ── Python venv + dependencies ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Install dependencies
+# ---------------------------------------------------------------------------
 function Install-BackendDeps {
-    section "Backend Dependencies"
+    section "Backend Python Dependencies"
+
+    $pyCmd = Get-PythonExe
+    if ($null -eq $pyCmd) { err "Python not in PATH - cannot install."; return }
 
     # Create venv if missing
     if (-not (Test-Path $Script:VENV)) {
-        info "Creating Python virtual environment..."
-        python -m venv $Script:VENV
-        ok "Virtual environment created at backend/.venv"
+        info "Creating virtual environment at: $($Script:VENV)"
+        & $pyCmd -m venv $Script:VENV
+        if ($LASTEXITCODE -ne 0) { err "Failed to create virtual environment."; return }
+        ok "Virtual environment created"
     } else {
-        ok "Virtual environment exists"
+        ok "Virtual environment already exists"
     }
 
-    $pip = Join-Path $Script:VENV "Scripts\pip.exe"
-    if (-not (Test-Path $pip)) { $pip = Join-Path $Script:VENV "bin/pip" }
+    $pip = Get-VenvPip
+    if ($null -eq $pip) { err "pip not found in venv."; return }
 
-    info "Installing Python packages..."
-    $req = Join-Path $Script:BACKEND "requirements.txt"
-    & $pip install -r $req -q --disable-pip-version-check 2>&1 | Out-Null
-    ok "Python packages installed"
+    $reqFile = Join-Path $Script:BACKEND "requirements.txt"
+    info "Installing packages from requirements.txt  (may take a few minutes)..."
+    & $pip install -r $reqFile -q --disable-pip-version-check
+    if ($LASTEXITCODE -eq 0) {
+        ok "Python packages installed"
+    } else {
+        warn "Some packages may have failed - check the output above"
+    }
 }
 
-# ── Node dependencies ─────────────────────────────────────────────────────────
 function Install-FrontendDeps {
-    section "Frontend Dependencies"
+    section "Frontend Node Dependencies"
 
     $nm = Join-Path $Script:FRONTEND "node_modules"
     if (-not (Test-Path $nm)) {
-        info "Installing npm packages (first run, may take a minute)..."
+        info "Installing npm packages (first run takes a minute)..."
         Push-Location $Script:FRONTEND
-        npm install --silent 2>&1 | Out-Null
+        npm install
         Pop-Location
         ok "npm packages installed"
     } else {
@@ -193,134 +315,192 @@ function Install-FrontendDeps {
     }
 }
 
-# ── PID management ────────────────────────────────────────────────────────────
-function Save-Pids {
-    param([int]$BackendPid, [int]$FrontendPid)
-    @{ backend = $BackendPid; frontend = $FrontendPid } | ConvertTo-Json | Set-Content $Script:PID_FILE
-}
-
-function Get-SavedPids {
-    if (Test-Path $Script:PID_FILE) {
-        return Get-Content $Script:PID_FILE | ConvertFrom-Json
+# ---------------------------------------------------------------------------
+# Wait for a TCP port to open
+# ---------------------------------------------------------------------------
+function Wait-ForPort {
+    param(
+        [int]$Port,
+        [string]$Name,
+        [int]$TimeoutSec = 60
+    )
+    $elapsed = 0
+    $chars = @('|','/','-','\')
+    $i = 0
+    while ($elapsed -lt $TimeoutSec) {
+        $conn = Test-NetConnection -ComputerName localhost -Port $Port `
+            -InformationLevel Quiet -WarningAction SilentlyContinue 2>$null
+        if ($conn) {
+            Write-Host "`r  $($CG)OK$($CX)  $Name is ready on port $Port              "
+            return $true
+        }
+        $spin = $chars[$i % $chars.Length]
+        $pct  = "$($elapsed)/$($TimeoutSec)s"
+        Write-Host "`r  $($CY)$spin$($CX)   Waiting for $Name ... ($pct)" -NoNewline
+        Start-Sleep -Seconds 2
+        $elapsed += 2
+        $i++
     }
-    return $null
+    Write-Host "`r  $($CR)!!$($CX)  $Name did not start within $($TimeoutSec)s             "
+    return $false
 }
 
-function Stop-Process-Safe {
-    param([int]$Pid)
-    try {
-        $p = Get-Process -Id $Pid -ErrorAction SilentlyContinue
-        if ($p) { $p.Kill(); $p.WaitForExit(3000) }
-    } catch {}
-}
-
-# ── Start services ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Start / Stop services
+# ---------------------------------------------------------------------------
 function Start-Backend {
     $null = New-Item -ItemType Directory -Path $Script:LOG_DIR -Force
 
-    $python  = Join-Path $Script:VENV "Scripts\python.exe"
-    if (-not (Test-Path $python)) { $python = Join-Path $Script:VENV "bin/python" }
+    $uvicorn = Get-VenvUvicorn
+    $pyExe   = Get-VenvPython
 
-    info "Starting FastAPI backend on http://localhost:8000 ..."
-    $proc = Start-Process -FilePath $python `
-        -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" `
+    if ($null -ne $uvicorn) {
+        $exe  = $uvicorn
+        $args = @("app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload")
+    } elseif ($null -ne $pyExe) {
+        $exe  = $pyExe
+        $args = @("-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload")
+    } else {
+        err "Cannot find uvicorn or python in virtual environment."
+        return $false
+    }
+
+    info "Starting FastAPI backend  ->  http://localhost:8000"
+
+    $proc = Start-Process `
+        -FilePath      $exe `
+        -ArgumentList  $args `
         -WorkingDirectory $Script:BACKEND `
         -RedirectStandardOutput $Script:BE_LOG `
         -RedirectStandardError  $Script:BE_LOG `
         -PassThru `
         -WindowStyle Hidden
-    return $proc.Id
+
+    $proc.Id | Set-Content $Script:BE_PID
+    return $true
 }
 
 function Start-Frontend {
     $null = New-Item -ItemType Directory -Path $Script:LOG_DIR -Force
 
-    info "Starting Next.js frontend on http://localhost:3000 ..."
-    $proc = Start-Process -FilePath "npm" `
-        -ArgumentList "run", "dev" `
+    info "Starting Next.js frontend  ->  http://localhost:3000"
+
+    $proc = Start-Process `
+        -FilePath     "npm" `
+        -ArgumentList @("run", "dev") `
         -WorkingDirectory $Script:FRONTEND `
         -RedirectStandardOutput $Script:FE_LOG `
         -RedirectStandardError  $Script:FE_LOG `
         -PassThru `
         -WindowStyle Hidden
-    return $proc.Id
+
+    $proc.Id | Set-Content $Script:FE_PID
+    return $true
 }
 
-function Wait-ForPort {
-    param([int]$Port, [string]$Name, [int]$TimeoutSec = 60)
-    $spinner = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
-    $elapsed = 0; $i = 0
-    while ($elapsed -lt $TimeoutSec) {
-        $conn = Test-NetConnection -ComputerName localhost -Port $Port `
-            -InformationLevel Quiet -WarningAction SilentlyContinue 2>$null
-        if ($conn) {
-            Write-Host "`r  $($Script:ColorOK)✔$($Script:ColorReset) $Name is ready on :$Port               "
-            return $true
+function Stop-ServiceByPid {
+    param([string]$PidFile, [string]$Name)
+    if (Test-Path $PidFile) {
+        $savedPid = [int](Get-Content $PidFile -Raw).Trim()
+        try {
+            $proc = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+            if ($proc) {
+                $proc.Kill()
+                $proc.WaitForExit(5000) | Out-Null
+                ok "$Name stopped (PID $savedPid)"
+            } else {
+                dim "$Name process (PID $savedPid) was already gone"
+            }
+        } catch {
+            warn "Could not stop $Name PID $savedPid : $_"
         }
-        $spin = $spinner[$i % $spinner.Length]
-        Write-Host "`r  $($Script:ColorWarn)$spin$($Script:ColorReset) Waiting for $Name... ($elapsed/$TimeoutSec s)" -NoNewline
-        Start-Sleep -Seconds 2; $elapsed += 2; $i++
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    } else {
+        dim "No saved PID for $Name"
     }
-    Write-Host "`r  $($Script:ColorErr)✖$($Script:ColorReset) $Name did not start within ${TimeoutSec}s         "
-    return $false
 }
 
-# ── Actions ───────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
 function Invoke-Start {
-    $bePid = 0; $fePid = 0
+    section "Starting Services"
+    $beOk = $true
+    $feOk = $true
 
     if (-not $FrontendOnly) {
-        $bePid = Start-Backend
-        $beReady = Wait-ForPort -Port 8000 -Name "Backend API" -TimeoutSec 45
-        if (-not $beReady) {
-            warn "Backend slow to start — check .local-logs/backend.log"
+        $beOk = Start-Backend
+        if ($beOk) {
+            $beReady = Wait-ForPort -Port 8000 -Name "Backend" -TimeoutSec 50
+            if (-not $beReady) {
+                warn "Backend is slow to start. Check: .local-logs\backend.log"
+            }
         }
     }
 
     if (-not $BackendOnly) {
-        $fePid = Start-Frontend
-        $feReady = Wait-ForPort -Port 3000 -Name "Frontend UI" -TimeoutSec 90
-        if (-not $feReady) {
-            warn "Frontend slow to start — check .local-logs/frontend.log"
+        $feOk = Start-Frontend
+        if ($feOk) {
+            $feReady = Wait-ForPort -Port 3000 -Name "Frontend" -TimeoutSec 90
+            if (-not $feReady) {
+                warn "Frontend is slow to start. Check: .local-logs\frontend.log"
+            }
         }
     }
-
-    Save-Pids -BackendPid $bePid -FrontendPid $fePid
 }
 
 function Invoke-Stop {
     section "Stopping Services"
-    $pids = Get-SavedPids
-    if ($null -eq $pids) { warn "No running services found (.local-pids missing)"; return }
+    Stop-ServiceByPid -PidFile $Script:BE_PID -Name "Backend"
+    Stop-ServiceByPid -PidFile $Script:FE_PID -Name "Frontend"
 
-    if ($pids.backend -gt 0) {
-        Stop-Process-Safe -Pid $pids.backend
-        ok "Backend stopped (PID $($pids.backend))"
-    }
-    if ($pids.frontend -gt 0) {
-        Stop-Process-Safe -Pid $pids.frontend
-        ok "Frontend stopped (PID $($pids.frontend))"
-    }
-
-    # Also kill any orphaned uvicorn / next processes
-    Get-Process -Name "python","node" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "uvicorn|next" } |
+    # Kill any orphaned processes as a safety net
+    Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @("python","python3","node") } |
+        Where-Object {
+            try { $_.MainModule.FileName -match "agi.agent|AGI.agent" } catch { $false }
+        } |
         ForEach-Object { $_.Kill() }
 
-    if (Test-Path $Script:PID_FILE) { Remove-Item $Script:PID_FILE -Force }
-    ok "All services stopped"
+    ok "Done"
 }
 
 function Invoke-Status {
     section "Service Status"
-    $ports = @{ "Backend API" = 8000; "Frontend UI" = 3000 }
-    foreach ($svc in $ports.Keys) {
-        $port = $ports[$svc]
-        $conn = Test-NetConnection -ComputerName localhost -Port $port `
+
+    $services = @(
+        @{ Name = "Backend API";  Port = 8000; Url = "http://localhost:8000/health" },
+        @{ Name = "Frontend UI";  Port = 3000; Url = "http://localhost:3000" }
+    )
+
+    foreach ($svc in $services) {
+        $conn = Test-NetConnection -ComputerName localhost -Port $svc.Port `
             -InformationLevel Quiet -WarningAction SilentlyContinue 2>$null
-        $label = if ($conn) { "$($Script:ColorOK)● RUNNING$($Script:ColorReset)" } else { "$($Script:ColorDim)○ stopped$($Script:ColorReset)" }
-        $url   = if ($conn) { "$($Script:ColorInfo)http://localhost:$port$($Script:ColorReset)" } else { "http://localhost:$port" }
-        Write-Host "  $label  $($svc.PadRight(14)) $url"
+        $namePad = $svc.Name.PadRight(14)
+        if ($conn) {
+            Write-Host "  $($CG)RUNNING$($CX)  $namePad  $($CC)$($svc.Url)$($CX)"
+        } else {
+            Write-Host "  $($CD)stopped$($CX)  $namePad  $($CD)$($svc.Url)$($CX)"
+        }
+    }
+
+    Write-Host ""
+    dim "Logs : $($Script:LOG_DIR)"
+    dim "venv : $($Script:VENV)"
+}
+
+function Show-Logs {
+    param([string]$Which = "both")
+    $files = switch ($Which) {
+        "backend"  { @($Script:BE_LOG) }
+        "frontend" { @($Script:FE_LOG) }
+        default    { @($Script:BE_LOG, $Script:FE_LOG) }
+    }
+    $existing = $files | Where-Object { Test-Path $_ }
+    if ($existing.Count -eq 0) {
+        warn "No log files yet. Start the services first."
+    } else {
+        Get-Content $existing -Tail 40 -Wait
     }
 }
 
@@ -330,38 +510,51 @@ function Invoke-OpenBrowser {
 
 function Show-Completion {
     Write-Host ""
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ╔══════════════════════════════════════════════╗$($Script:ColorReset)"
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ║$($Script:ColorReset)$($Script:ColorBold)    ✨  AGI Agent Running Locally           $($Script:ColorOK)║$($Script:ColorReset)"
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ╠══════════════════════════════════════════════╣$($Script:ColorReset)"
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ║$($Script:ColorReset)  $($Script:ColorDim)Frontend:$($Script:ColorReset)  $($Script:ColorInfo)http://localhost:3000$($Script:ColorReset)            $($Script:ColorOK)$($Script:ColorBold)║$($Script:ColorReset)"
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ║$($Script:ColorReset)  $($Script:ColorDim)Backend: $($Script:ColorReset)  $($Script:ColorInfo)http://localhost:8000$($Script:ColorReset)            $($Script:ColorOK)$($Script:ColorBold)║$($Script:ColorReset)"
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ║$($Script:ColorReset)  $($Script:ColorDim)API Docs:$($Script:ColorReset)  $($Script:ColorInfo)http://localhost:8000/docs$($Script:ColorReset)       $($Script:ColorOK)$($Script:ColorBold)║$($Script:ColorReset)"
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ║$($Script:ColorReset)  $($Script:ColorDim)Storage: $($Script:ColorReset)  SQLite + in-memory (no Docker!)         $($Script:ColorOK)$($Script:ColorBold)║$($Script:ColorReset)"
-    Write-Host "$($Script:ColorOK)$($Script:ColorBold)  ╚══════════════════════════════════════════════╝$($Script:ColorReset)"
+    Write-Host "$($CG)$($CB)  +------------------------------------------------+$($CX)"
+    Write-Host "$($CG)$($CB)  |$($CX)$($CB)   AGI Agent is running locally               $($CG)|$($CX)"
+    Write-Host "$($CG)$($CB)  +------------------------------------------------+$($CX)"
+    Write-Host "$($CG)$($CB)  |$($CX)  $($CD)Frontend :$($CX)  $($CC)http://localhost:3000$($CX)            $($CG)$($CB)|$($CX)"
+    Write-Host "$($CG)$($CB)  |$($CX)  $($CD)Backend  :$($CX)  $($CC)http://localhost:8000$($CX)            $($CG)$($CB)|$($CX)"
+    Write-Host "$($CG)$($CB)  |$($CX)  $($CD)API Docs :$($CX)  $($CC)http://localhost:8000/docs$($CX)       $($CG)$($CB)|$($CX)"
+    Write-Host "$($CG)$($CB)  |$($CX)  $($CD)Storage  :$($CX)  SQLite  (no Docker needed)         $($CG)$($CB)|$($CX)"
+    Write-Host "$($CG)$($CB)  |$($CX)  $($CD)Data dir :$($CX)  $($Script:ROOT)  $($CG)$($CB)|$($CX)"
+    Write-Host "$($CG)$($CB)  +------------------------------------------------+$($CX)"
     Write-Host ""
-    Write-Host "  $($Script:ColorDim)Logs:$($Script:ColorReset)  .local-logs\backend.log   .local-logs\frontend.log"
-    Write-Host "  $($Script:ColorDim)Stop:$($Script:ColorReset)  $($Script:ColorWarn).\run-local.ps1 -Action stop$($Script:ColorReset)"
+    Write-Host "  $($CD)View logs :$($CX)  $($CY).\run-local.ps1 -Action logs-backend$($CX)"
+    Write-Host "  $($CD)Stop      :$($CX)  $($CY).\run-local.ps1 -Action stop$($CX)"
     Write-Host ""
 
     $open = Read-Host "  Open browser now? [Y/n]"
     if ($open -ne "n" -and $open -ne "N") { Invoke-OpenBrowser }
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 function Main {
+    # Must run from script directory so relative paths work correctly
+    Set-Location $Script:ROOT
+
     Write-Banner
 
     switch ($Action) {
-        "stop"           { Invoke-Stop; return }
-        "status"         { Invoke-Status; return }
-        "open"           { Invoke-OpenBrowser; return }
-        "logs-backend"   { if (Test-Path $Script:BE_LOG) { Get-Content $Script:BE_LOG -Tail 50 -Wait } else { warn "No backend log yet" }; return }
-        "logs-frontend"  { if (Test-Path $Script:FE_LOG) { Get-Content $Script:FE_LOG -Tail 50 -Wait } else { warn "No frontend log yet" }; return }
-        "restart"        { Invoke-Stop; Start-Sleep 2 }
+        "stop"          { Invoke-Stop; return }
+        "status"        { Invoke-Status; return }
+        "open"          { Invoke-OpenBrowser; return }
+        "logs-backend"  { Show-Logs "backend"; return }
+        "logs-frontend" { Show-Logs "frontend"; return }
+        "restart"       { Invoke-Stop; Start-Sleep -Seconds 2 }
+        "install" {
+            if (-not (Test-Prerequisites)) { exit 1 }
+            Initialize-Environment
+            if (-not $FrontendOnly) { Install-BackendDeps }
+            if (-not $BackendOnly)  { Install-FrontendDeps }
+            ok "All dependencies installed. Run: .\run-local.ps1"
+            return
+        }
     }
 
     if (-not (Test-Prerequisites)) { exit 1 }
-
     Initialize-Environment
 
     if (-not $SkipInstall) {
@@ -369,7 +562,6 @@ function Main {
         if (-not $BackendOnly)  { Install-FrontendDeps }
     }
 
-    section "Starting Services"
     Invoke-Start
     Show-Completion
 }
