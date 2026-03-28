@@ -230,15 +230,6 @@ export function EventTimeline({ events, isConnected }: EventTimelineProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const filtered = useMemo(() => {
-    if (filter === 'all') return events;
-    return events.filter((e) => {
-      const cfg = EVENT_CONFIG[e.type];
-      return cfg?.filter === filter || cfg?.filter === 'all' ? false : cfg?.filter === filter;
-    });
-  }, [events, filter]);
-
-  // Real filter
   const realFiltered = useMemo(() => {
     if (filter === 'all') return events;
     return events.filter((e) => {
