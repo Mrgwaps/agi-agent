@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     # ── HeyGen (Interactive Avatar) ───────────────────────────────────────────
     heygen_api_key: str = Field(default="", alias="HEYGEN_API_KEY")
 
+    # ── AgentMail (agent email inboxes) ──────────────────────────────────────
+    agentmail_api_key: str = Field(default="", alias="AGENTMAIL_API_KEY")
+
+    # ── Ghost.build (hybrid memory / PostgreSQL) ──────────────────────────────
+    ghost_api_key: str = Field(default="", alias="GHOST_API_KEY")
+
+    # ── Stripe ────────────────────────────────────────────────────────────────
+    stripe_secret_key: str = Field(default="", alias="STRIPE_SECRET_KEY")
+    stripe_publishable_key: str = Field(default="", alias="STRIPE_PUBLISHABLE_KEY")
+    stripe_webhook_secret: str = Field(default="", alias="STRIPE_WEBHOOK_SECRET")
+
     # ── Database ──────────────────────────────────────────────────────────────
     postgres_url: str = Field(
         default="postgresql://agi:agi@localhost:5432/agi_agent",

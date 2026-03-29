@@ -221,6 +221,13 @@ export interface Settings {
   voiceAutoPlay: boolean;
   voiceVoice: string;
   avatarEnabled: boolean;
+  // AgentMail
+  agentMailApiKey: string;
+  // Ghost.build
+  ghostApiKey: string;
+  // Stripe
+  stripePublishableKey: string;
+  stripeWebhookSecret: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -246,6 +253,10 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceAutoPlay: true,
   voiceVoice: 'af_sky',
   avatarEnabled: false,
+  agentMailApiKey: '',
+  ghostApiKey: '',
+  stripePublishableKey: '',
+  stripeWebhookSecret: '',
 };
 
 // ============================================================

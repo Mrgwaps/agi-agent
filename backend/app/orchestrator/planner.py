@@ -241,7 +241,7 @@ class PlannerService:
 _PLAN_FORMAT_INSTRUCTIONS = """
 Return ONLY a valid JSON array. Each element must have exactly these fields:
 - description: string (what to do — be specific and verifiable)
-- tool_to_use: string (one of: content_writer, web_researcher, enhanced_search, web_search, filesystem, code_executor, json_generator, hyperbrowser, image_generator, location, hf_inference, llm_only)
+- tool_to_use: string (one of: content_writer, web_researcher, enhanced_search, web_search, filesystem, code_executor, json_generator, hyperbrowser, image_generator, location, hf_inference, email, llm_only)
 - expected_output: string (what success looks like — specific and measurable)
 - requires_approval: boolean
 

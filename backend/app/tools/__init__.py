@@ -14,6 +14,7 @@ from app.tools.image_generator import ImageGeneratorTool
 from app.tools.enhanced_search import EnhancedSearchTool
 from app.tools.location_tool import LocationTool
 from app.tools.hf_inference import HFInferenceTool
+from app.tools.email_tool import EmailTool
 
 __all__ = [
     "BaseTool",
@@ -29,4 +30,5 @@ __all__ = [
     "EnhancedSearchTool",
     "LocationTool",
     "HFInferenceTool",
+    "EmailTool",
 ]

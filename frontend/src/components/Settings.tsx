@@ -20,6 +20,9 @@ import {
   Sparkles,
   Mic,
   Video,
+  Mail,
+  CreditCard,
+  Database,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { testOllamaConnection } from '@/lib/api';
@@ -502,6 +505,69 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
                   value={local.avatarEnabled}
                   onChange={(v) => update('avatarEnabled', v)}
                 />
+              </Section>
+
+              {/* AgentMail */}
+              <Section title="AgentMail (Agent Inboxes)" icon={Mail} defaultOpen={false}>
+                <p className="text-xs text-text-muted">
+                  Give agents dedicated email addresses to sign up for platforms and communicate with other agents or users.
+                </p>
+                <SecretInput
+                  label="AgentMail API Key"
+                  value={local.agentMailApiKey}
+                  onChange={(v) => update('agentMailApiKey', v)}
+                  placeholder="am_us_…"
+                  description="API key from agentmail.to — agents can create inboxes, send & receive emails"
+                />
+              </Section>
+
+              {/* Ghost.build */}
+              <Section title="Ghost.build (Agent Memory)" icon={Database} defaultOpen={false}>
+                <p className="text-xs text-text-muted">
+                  Persistent hybrid memory for agents using managed PostgreSQL with BM25 + pgvector search. Enables agents to remember across tasks.
+                </p>
+                <SecretInput
+                  label="Ghost API Key"
+                  value={local.ghostApiKey}
+                  onChange={(v) => update('ghostApiKey', v)}
+                  placeholder="ghost_…"
+                  description="API key from ghost.build — enables persistent agent memory collections"
+                />
+              </Section>
+
+              {/* Payments */}
+              <Section title="Payments (Stripe)" icon={CreditCard} defaultOpen={false}>
+                <p className="text-xs text-text-muted">
+                  Accept payments for agent services. Connect your Stripe account to enable one-off payments, subscriptions, and the earnings dashboard.
+                </p>
+                <SecretInput
+                  label="Stripe Publishable Key"
+                  value={local.stripePublishableKey}
+                  onChange={(v) => update('stripePublishableKey', v)}
+                  placeholder="pk_live_… or pk_test_…"
+                  description="Safe to expose in the browser — used for Stripe.js checkout"
+                />
+                <SecretInput
+                  label="Stripe Webhook Secret"
+                  value={local.stripeWebhookSecret}
+                  onChange={(v) => update('stripeWebhookSecret', v)}
+                  placeholder="whsec_…"
+                  description="From your Stripe dashboard → Webhooks. Used to verify incoming events."
+                />
+                <div className="p-3 rounded-xl bg-surface border border-border">
+                  <p className="text-xs text-text-muted">
+                    <span className="font-semibold text-text">Webhook URL:</span>{' '}
+                    <code className="font-mono text-primary">
+                      {typeof window !== 'undefined' ? window.location.origin.replace(':3000', ':8000') : 'http://localhost:8000'}/webhooks/stripe
+                    </code>
+                  </p>
+                  <p className="text-xs text-text-muted mt-1">
+                    Add this URL in your Stripe dashboard under Developers → Webhooks. Listen for:{' '}
+                    <code className="font-mono text-xs">checkout.session.completed</code>,{' '}
+                    <code className="font-mono text-xs">payment_intent.succeeded</code>,{' '}
+                    <code className="font-mono text-xs">invoice.paid</code>
+                  </p>
+                </div>
               </Section>
 
               {/* Safety */}

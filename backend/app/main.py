@@ -131,6 +131,9 @@ def create_app() -> FastAPI:
     from app.api.eval import router as eval_router
     from app.api.voice import router as voice_router
     from app.api.heartbeat import router as heartbeat_router
+    from app.api.email_api import router as email_router
+    from app.api.payments import router as payments_router
+    from app.api.webhooks import router as webhooks_router
 
     app.include_router(tasks_router)
     app.include_router(tools_router)
@@ -138,6 +141,9 @@ def create_app() -> FastAPI:
     app.include_router(eval_router)
     app.include_router(voice_router)
     app.include_router(heartbeat_router)
+    app.include_router(email_router)
+    app.include_router(payments_router)
+    app.include_router(webhooks_router)
 
     # ── Health check ─────────────────────────────────────────────────────────
     @app.get("/health", tags=["system"])

@@ -21,3 +21,4 @@ sqlalchemy>=2.0.0
 alembic>=1.13.0
 sentence-transformers>=3.0.0
 lxml>=5.0.0
+stripe>=10.0.0
