@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -53,6 +54,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await vector_store._get_collection()
     except Exception as exc:
         logger.warning("ChromaDB unavailable: %s", exc)
+
+    # Start 30-minute heartbeat intelligence loop
+    from app.api.heartbeat import heartbeat_loop
+    _heartbeat_task = asyncio.create_task(heartbeat_loop())
+    logger.info("Heartbeat intelligence loop started (30-min interval)")
 
     logger.info("%s ready.", settings.app_name)
     yield
@@ -123,11 +129,15 @@ def create_app() -> FastAPI:
     from app.api.tools import router as tools_router
     from app.api.memory import router as memory_router
     from app.api.eval import router as eval_router
+    from app.api.voice import router as voice_router
+    from app.api.heartbeat import router as heartbeat_router
 
     app.include_router(tasks_router)
     app.include_router(tools_router)
     app.include_router(memory_router)
     app.include_router(eval_router)
+    app.include_router(voice_router)
+    app.include_router(heartbeat_router)
 
     # ── Health check ─────────────────────────────────────────────────────────
     @app.get("/health", tags=["system"])

@@ -18,6 +18,8 @@ import {
   ChevronDown,
   RefreshCw,
   Sparkles,
+  Mic,
+  Video,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { testOllamaConnection } from '@/lib/api';
@@ -439,6 +441,66 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
                   onChange={(v) => update('serpApiKey', v)}
                   placeholder="your-serpapi-key"
                   description="Google/Bing search results. Falls back to DuckDuckGo when not set."
+                />
+                <SecretInput
+                  label="fal.ai (Kokoro TTS)"
+                  value={local.falApiKey}
+                  onChange={(v) => update('falApiKey', v)}
+                  placeholder="user_id:key_id"
+                  description="Natural voice synthesis for agent responses. Get a key at fal.ai"
+                />
+                <SecretInput
+                  label="HeyGen (AI Avatar)"
+                  value={local.heygenApiKey}
+                  onChange={(v) => update('heygenApiKey', v)}
+                  placeholder="sk_V2_…"
+                  description="Real-time talking AI avatar via WebRTC. Get a key at heygen.com"
+                />
+              </Section>
+
+              {/* Voice & Avatar */}
+              <Section title="Voice & Avatar" icon={Mic} defaultOpen={false}>
+                <p className="text-xs text-text-muted">
+                  Configure voice responses and the HeyGen interactive avatar. Requires fal.ai and/or HeyGen keys above.
+                </p>
+                <Toggle
+                  label="Enable voice responses"
+                  description="Agent speaks its responses aloud using Kokoro TTS"
+                  value={local.voiceEnabled}
+                  onChange={(v) => update('voiceEnabled', v)}
+                />
+                {local.voiceEnabled && (
+                  <>
+                    <Toggle
+                      label="Auto-play on task completion"
+                      description="Automatically speak when the agent finishes a task"
+                      value={local.voiceAutoPlay}
+                      onChange={(v) => update('voiceAutoPlay', v)}
+                    />
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-sm text-text font-medium">Voice</label>
+                      <p className="text-xs text-text-muted -mt-0.5">Select the Kokoro TTS voice</p>
+                      <select
+                        value={local.voiceVoice}
+                        onChange={(e) => update('voiceVoice', e.target.value)}
+                        className="w-full rounded-xl border border-border bg-surface px-3.5 py-2.5 text-sm text-text focus:outline-none focus:border-primary/50 transition-colors"
+                      >
+                        <option value="af_sky">af_sky — American Female (warm, conversational)</option>
+                        <option value="af_bella">af_bella — American Female (bright, energetic)</option>
+                        <option value="af_sarah">af_sarah — American Female (clear, professional)</option>
+                        <option value="am_michael">am_michael — American Male (deep, authoritative)</option>
+                        <option value="am_adam">am_adam — American Male (friendly, casual)</option>
+                        <option value="bf_emma">bf_emma — British Female (crisp, formal)</option>
+                        <option value="bm_george">bm_george — British Male (refined, measured)</option>
+                      </select>
+                    </div>
+                  </>
+                )}
+                <Toggle
+                  label="Enable AI Avatar"
+                  description="Show a real-time HeyGen talking avatar in the interface"
+                  value={local.avatarEnabled}
+                  onChange={(v) => update('avatarEnabled', v)}
                 />
               </Section>
 

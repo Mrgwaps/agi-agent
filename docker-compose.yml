@@ -151,6 +151,8 @@ services:
       - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY:-}
       - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY:-}
       - SERP_API_KEY=${SERP_API_KEY:-}
+      - FAL_API_KEY=${FAL_API_KEY:-}
+      - HEYGEN_API_KEY=${HEYGEN_API_KEY:-}
       - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://agi_user:change-me-strong-password@postgres:5432/agi_agent}
       - REDIS_URL=${REDIS_URL:-redis://:change-me-redis-password@redis:6379/0}
       - CHROMA_HOST=chromadb

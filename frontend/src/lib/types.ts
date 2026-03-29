@@ -214,6 +214,13 @@ export interface Settings {
   googleMapsApiKey: string;
   huggingfaceApiKey: string;
   serpApiKey: string;
+  // Voice & Avatar
+  falApiKey: string;
+  heygenApiKey: string;
+  voiceEnabled: boolean;
+  voiceAutoPlay: boolean;
+  voiceVoice: string;
+  avatarEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -233,6 +240,12 @@ export const DEFAULT_SETTINGS: Settings = {
   googleMapsApiKey: '',
   huggingfaceApiKey: '',
   serpApiKey: '',
+  falApiKey: '',
+  heygenApiKey: '',
+  voiceEnabled: false,
+  voiceAutoPlay: true,
+  voiceVoice: 'af_sky',
+  avatarEnabled: false,
 };
 
 // ============================================================

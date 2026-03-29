@@ -10,6 +10,9 @@ import { TaskView } from '@/components/TaskView';
 import { CostTracker } from '@/components/CostTracker';
 import { SettingsPanel } from '@/components/Settings';
 import { ModelIndicator } from '@/components/ModelIndicator';
+import { VoicePlayer } from '@/components/VoicePlayer';
+import { VoiceAvatar } from '@/components/VoiceAvatar';
+import { useHeartbeat } from '@/hooks/useHeartbeat';
 import { cn } from '@/lib/utils';
 
 // ============================================================
@@ -27,11 +30,15 @@ function Header({
   onOpenSettings,
   rightPanel,
   setRightPanel,
+  voicePlayerSlot,
+  avatarSlot,
 }: {
   currentTaskId: string | null;
   onOpenSettings: () => void;
   rightPanel: RightPanel;
   setRightPanel: (p: RightPanel) => void;
+  voicePlayerSlot?: React.ReactNode;
+  avatarSlot?: React.ReactNode;
 }) {
   return (
     <header className="flex-shrink-0 h-12 border-b border-border flex items-center px-4 gap-3 bg-card z-10">
@@ -52,6 +59,12 @@ function Header({
 
       {/* Right controls */}
       <div className="flex items-center gap-1.5 flex-shrink-0">
+        {/* Voice player status/mute button */}
+        {voicePlayerSlot}
+
+        {/* Avatar toggle button */}
+        {avatarSlot}
+
         <button
           onClick={() => setRightPanel(rightPanel === 'cost' ? null : 'cost')}
           className={cn(
@@ -84,10 +97,14 @@ function Header({
 export default function HomePage() {
   const currentTaskId = useStore((s) => s.currentTaskId);
   const setCurrentTask = useStore((s) => s.setCurrentTask);
+  const settings = useStore((s) => s.settings);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [rightPanel, setRightPanel] = useState<RightPanel>('cost');
   const [showNewTask, setShowNewTask] = useState(false);
+
+  // 30-minute intelligence heartbeat (runs silently, shows toasts)
+  useHeartbeat();
 
   function handleNewTask() {
     setShowNewTask(true);
@@ -99,6 +116,8 @@ export default function HomePage() {
   }
 
   const showInput = !currentTaskId || showNewTask;
+  const voiceActive = settings.voiceEnabled && !!settings.falApiKey;
+  const avatarActive = settings.avatarEnabled;
 
   return (
     <div className="neural-bg flex flex-col h-screen overflow-hidden">
@@ -108,6 +127,20 @@ export default function HomePage() {
         onOpenSettings={() => setSettingsOpen(true)}
         rightPanel={rightPanel}
         setRightPanel={setRightPanel}
+        voicePlayerSlot={
+          voiceActive ? (
+            <VoicePlayer
+              taskId={currentTaskId}
+              enabled={settings.voiceAutoPlay}
+              voice={settings.voiceVoice}
+            />
+          ) : null
+        }
+        avatarSlot={
+          avatarActive ? (
+            <VoiceAvatar enabled={avatarActive} />
+          ) : null
+        }
       />
 
       {/* Body */}

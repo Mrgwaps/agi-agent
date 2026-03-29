@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     # ── SerpAPI ───────────────────────────────────────────────────────────────
     serp_api_key: str = Field(default="", alias="SERP_API_KEY")
 
+    # ── fal.ai (Kokoro TTS, image generation) ────────────────────────────────
+    fal_api_key: str = Field(default="", alias="FAL_API_KEY")
+
+    # ── HeyGen (Interactive Avatar) ───────────────────────────────────────────
+    heygen_api_key: str = Field(default="", alias="HEYGEN_API_KEY")
+
     # ── Database ──────────────────────────────────────────────────────────────
     postgres_url: str = Field(
         default="postgresql://agi:agi@localhost:5432/agi_agent",

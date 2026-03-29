@@ -13,11 +13,15 @@ import {
   Loader2,
   Sparkles,
   ChevronDown,
+  Mic,
+  MicOff,
+  Square,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { createTask } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { TaskConstraints } from '@/lib/types';
+import { useVoice } from '@/hooks/useVoice';
 
 const DEMO_TASKS = [
   {
@@ -96,6 +100,18 @@ export function TaskInput({ onTaskCreated }: TaskInputProps) {
   });
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Voice / STT
+  const { isSupported: voiceSupported, isListening, startListening, stopListening, interimTranscript, error: voiceError } = useVoice({
+    onTranscriptChange: (text) => {
+      setGoal(text);
+      // Auto-resize textarea
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 240)}px`;
+      }
+    },
+  });
 
   function toggleConstraint(key: keyof TaskConstraints) {
     setConstraints((prev) => ({
@@ -194,7 +210,7 @@ export function TaskInput({ onTaskCreated }: TaskInputProps) {
             onChange={handleTextareaInput}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder="Describe your goal in detail…&#10;&#10;The agent will create a plan, use tools, and work autonomously to achieve it."
+            placeholder={isListening ? 'Listening… speak your goal now' : 'Describe your goal in detail…\n\nThe agent will create a plan, use tools, and work autonomously to achieve it.'}
             rows={5}
             disabled={loading}
             className={cn(
@@ -203,15 +219,58 @@ export function TaskInput({ onTaskCreated }: TaskInputProps) {
               'focus-glow',
               focused && 'border-primary/50',
               !focused && 'border-border',
-              loading && 'opacity-50 cursor-not-allowed'
+              loading && 'opacity-50 cursor-not-allowed',
+              voiceSupported && 'pb-10', // make room for mic button
+              isListening && 'border-red-400/60 ring-1 ring-red-400/30'
             )}
           />
-          {goal.length > 0 && (
+
+          {/* Mic button — bottom-left inside textarea */}
+          {voiceSupported && !loading && (
+            <button
+              type="button"
+              onClick={isListening ? stopListening : startListening}
+              title={isListening ? 'Stop listening' : 'Start voice input'}
+              className={cn(
+                'absolute bottom-3 left-3 flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-all duration-150',
+                isListening
+                  ? 'text-red-400 bg-red-500/10 border border-red-400/30 animate-pulse'
+                  : 'text-text-muted hover:text-text hover:bg-surface-overlay border border-transparent'
+              )}
+            >
+              {isListening ? (
+                <>
+                  <Square className="w-3 h-3" />
+                  <span>Stop</span>
+                </>
+              ) : (
+                <>
+                  <Mic className="w-3 h-3" />
+                  <span>Speak</span>
+                </>
+              )}
+            </button>
+          )}
+
+          {/* Interim transcript hint */}
+          {isListening && interimTranscript && (
+            <div className="absolute bottom-10 left-3 right-10 text-xs text-text-muted/60 italic truncate pointer-events-none">
+              {interimTranscript}
+            </div>
+          )}
+
+          {/* Character count */}
+          {goal.length > 0 && !isListening && (
             <div className="absolute bottom-3 right-3 text-xs text-text-muted">
               {goal.length}
             </div>
           )}
         </div>
+
+        {/* Voice error */}
+        {voiceError && (
+          <p className="text-xs text-error px-1">{voiceError}</p>
+        )}
 
         {/* Mode selector */}
         <div className="flex gap-2">
