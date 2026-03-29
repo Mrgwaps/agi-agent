@@ -282,8 +282,19 @@ function Install-BackendDeps {
     # Create venv if missing
     if (-not (Test-Path $Script:VENV)) {
         info "Creating virtual environment at: $($Script:VENV)"
+
+        # Point Python's temp dir to H: so venv creation doesn't touch C:
+        $prevTemp = $env:TEMP; $prevTmp = $env:TMP
+        $hTemp = Join-Path $Script:ROOT ".tmp"
+        $null = New-Item -ItemType Directory -Path $hTemp -Force
+        $env:TEMP = $hTemp; $env:TMP = $hTemp
+
         & $pyCmd -m venv $Script:VENV
-        if ($LASTEXITCODE -ne 0) { err "Failed to create virtual environment."; return }
+        $exitCode = $LASTEXITCODE
+
+        $env:TEMP = $prevTemp; $env:TMP = $prevTmp   # restore
+
+        if ($exitCode -ne 0) { err "Failed to create virtual environment."; return }
         ok "Virtual environment created"
     } else {
         ok "Virtual environment already exists"
@@ -292,18 +303,63 @@ function Install-BackendDeps {
     $pip = Get-VenvPip
     if ($null -eq $pip) { err "pip not found in venv."; return }
 
-    $reqFile = Join-Path $Script:BACKEND "requirements.txt"
+    # ---------------------------------------------------------------------------
+    # Redirect ALL pip temp/cache dirs to H: so a full C: drive never blocks us.
+    #   PIP_CACHE_DIR  - where pip caches downloaded wheels
+    #   TEMP / TMP     - where pip & build tools unpack packages during install
+    # ---------------------------------------------------------------------------
+    $pipCache = Join-Path $Script:ROOT ".pip-cache"
+    $pipTemp  = Join-Path $Script:ROOT ".tmp"
+    $null = New-Item -ItemType Directory -Path $pipCache -Force
+    $null = New-Item -ItemType Directory -Path $pipTemp  -Force
+
+    $prevTemp       = $env:TEMP
+    $prevTmp        = $env:TMP
+    $prevPipCache   = $env:PIP_CACHE_DIR
+    $prevPipTmpDir  = $env:PIP_TMPDIR
+
+    $env:TEMP         = $pipTemp
+    $env:TMP          = $pipTemp
+    $env:PIP_CACHE_DIR = $pipCache
+    $env:PIP_TMPDIR    = $pipTemp
+
+    info "Pip cache  : $pipCache"
+    info "Pip temp   : $pipTemp"
     info "Installing packages from requirements.txt  (may take a few minutes)..."
-    & $pip install -r $reqFile -q --disable-pip-version-check
-    if ($LASTEXITCODE -eq 0) {
+
+    $reqFile = Join-Path $Script:BACKEND "requirements.txt"
+    & $pip install -r $reqFile --disable-pip-version-check `
+        --cache-dir $pipCache `
+        --no-build-isolation
+
+    $exitCode = $LASTEXITCODE
+
+    # Restore original env vars
+    $env:TEMP         = $prevTemp
+    $env:TMP          = $prevTmp
+    if ($null -eq $prevPipCache)  { Remove-Item Env:\PIP_CACHE_DIR  -ErrorAction SilentlyContinue }
+    else                          { $env:PIP_CACHE_DIR  = $prevPipCache }
+    if ($null -eq $prevPipTmpDir) { Remove-Item Env:\PIP_TMPDIR     -ErrorAction SilentlyContinue }
+    else                          { $env:PIP_TMPDIR     = $prevPipTmpDir }
+
+    if ($exitCode -eq 0) {
         ok "Python packages installed"
     } else {
-        warn "Some packages may have failed - check the output above"
+        warn "Some packages may have failed - check output above"
     }
 }
 
 function Install-FrontendDeps {
     section "Frontend Node Dependencies"
+
+    # Redirect npm cache to H: so a full C: drive doesn't block the install.
+    # npm stores its cache in %APPDATA%\npm-cache by default (C: drive).
+    $npmCache = Join-Path $Script:ROOT ".npm-cache"
+    $null = New-Item -ItemType Directory -Path $npmCache -Force
+
+    $prevNpmCache = npm config get cache 2>$null
+    npm config set cache $npmCache --global 2>$null
+    info "npm cache  : $npmCache"
 
     $nm = Join-Path $Script:FRONTEND "node_modules"
     if (-not (Test-Path $nm)) {
@@ -314,6 +370,11 @@ function Install-FrontendDeps {
         ok "npm packages installed"
     } else {
         ok "node_modules already present"
+    }
+
+    # Restore previous npm cache location
+    if ($prevNpmCache -and $prevNpmCache -ne "") {
+        npm config set cache $prevNpmCache --global 2>$null
     }
 }
 
