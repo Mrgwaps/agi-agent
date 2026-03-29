@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
+import httpx
+
 from app.models.event import AgentEvent, EventType
 from app.models.task import StepStatus, TaskStep, TaskState
 from app.services.openrouter import openrouter_client
@@ -15,7 +17,12 @@ from app.tools.base import ToolRegistry
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
-BASE_BACKOFF = 2.0  # seconds
+BASE_BACKOFF = 3.0   # seconds for non-rate-limit errors
+RATE_LIMIT_BACKOFF = 15.0  # seconds when 429 reaches the executor level
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
 
 
 class ExecutorService:
@@ -80,7 +87,11 @@ class ExecutorService:
                 step.retry_count = attempt
 
                 if attempt < MAX_RETRIES:
-                    backoff = BASE_BACKOFF ** attempt
+                    # Use a longer backoff for rate-limit errors
+                    if _is_rate_limit(exc):
+                        backoff = RATE_LIMIT_BACKOFF * attempt
+                    else:
+                        backoff = BASE_BACKOFF ** attempt
                     self._emit(self._make_event(
                         EventType.retry,
                         payload={
@@ -89,6 +100,7 @@ class ExecutorService:
                             "max_retries": MAX_RETRIES,
                             "backoff_seconds": backoff,
                             "error": str(exc),
+                            "rate_limited": _is_rate_limit(exc),
                         },
                     ))
                     await asyncio.sleep(backoff)
