@@ -3,10 +3,10 @@
 // ============================================================
 
 export enum TaskStatus {
-  PENDING = 'pending',
+  PENDING = 'queued',
   PLANNING = 'planning',
   RUNNING = 'running',
-  AWAITING_APPROVAL = 'awaiting_approval',
+  AWAITING_APPROVAL = 'waiting_approval',
   COMPLETED = 'completed',
   FAILED = 'failed',
   ABORTED = 'aborted',

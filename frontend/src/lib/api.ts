@@ -1,5 +1,40 @@
 import type { TaskCreate, TaskState, AgentEvent } from './types';
 
+// ============================================================
+// API response normalizer (backend uses snake_case / taskId)
+// ============================================================
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeTask(raw: any): TaskState {
+  return {
+    id: raw.id ?? raw.taskId ?? raw.task_id,
+    goal: raw.goal,
+    status: raw.status,
+    mode: raw.mode ?? 'demo',
+    constraints: raw.constraints ?? {},
+    plan: (raw.plan ?? []).map((s: any) => ({
+      id: s.id,
+      index: s.index ?? 0,
+      title: s.title ?? s.description ?? '',
+      description: s.description ?? '',
+      toolToUse: s.tool_used ?? s.toolToUse,
+      status: s.status,
+      startedAt: s.started_at ?? s.startedAt,
+      completedAt: s.completed_at ?? s.completedAt,
+      actualCostUsd: s.cost_usd ?? s.actualCostUsd ?? 0,
+      error: s.error,
+    })),
+    currentStepIndex: raw.currentStepIndex ?? raw.currentStep ?? 0,
+    artifacts: raw.artifacts ?? [],
+    createdAt: raw.createdAt ?? raw.created_at ?? new Date().toISOString(),
+    startedAt: raw.startedAt ?? raw.started_at,
+    completedAt: raw.completedAt ?? raw.completed_at,
+    totalCostUsd: raw.totalCostUsd ?? raw.total_cost_usd ?? 0,
+    error: raw.error,
+    pendingApproval: raw.pendingApproval ?? raw.pending_approval,
+  };
+}
+
 const BASE_URL =
   typeof window !== 'undefined'
     ? (process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000')
@@ -47,18 +82,21 @@ export async function createTask(
   constraints: TaskCreate['constraints'],
   mode: 'demo' | 'interactive' = 'demo'
 ): Promise<TaskState> {
-  return apiFetch<TaskState>('/tasks', {
+  const raw = await apiFetch<unknown>('/tasks', {
     method: 'POST',
     body: JSON.stringify({ goal, constraints, mode } satisfies TaskCreate),
   });
+  return normalizeTask(raw);
 }
 
 export async function getTask(taskId: string): Promise<TaskState> {
-  return apiFetch<TaskState>(`/tasks/${taskId}`);
+  const raw = await apiFetch<unknown>(`/tasks/${taskId}`);
+  return normalizeTask(raw);
 }
 
 export async function listTasks(): Promise<TaskState[]> {
-  return apiFetch<TaskState[]>('/tasks');
+  const raw = await apiFetch<unknown[]>('/tasks');
+  return (raw ?? []).map(normalizeTask);
 }
 
 export async function approveAction(taskId: string): Promise<void> {

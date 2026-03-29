@@ -68,7 +68,7 @@ export function TaskSidebar({ onNewTask }: TaskSidebarProps) {
         ) : (
           <AnimatePresence mode="popLayout">
             {sortedTasks.map((task) => {
-              const cfg = STATUS_CONFIG[task.status];
+              const cfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG[TaskStatus.PENDING];
               const Icon = cfg.icon;
               const isActive = task.id === currentTaskId;
               const isRunning = task.status === TaskStatus.RUNNING || task.status === TaskStatus.PLANNING;

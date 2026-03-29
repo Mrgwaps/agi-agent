@@ -77,7 +77,7 @@ export function TaskView({ taskId }: TaskViewProps) {
     );
   }
 
-  const statusCfg = STATUS_CONFIG[task.status];
+  const statusCfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG[TaskStatus.PENDING];
   const StatusIcon = statusCfg.icon;
   const isActive = task.status === TaskStatus.RUNNING || task.status === TaskStatus.PLANNING;
   const plan = task.plan || [];
