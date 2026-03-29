@@ -469,9 +469,14 @@ function Start-Frontend {
 
     info "Starting Next.js frontend  ->  http://localhost:3000"
 
+    # On Windows, npm is a .cmd batch file, not a Win32 binary.
+    # Start-Process can only launch real executables, so we must run
+    # npm through cmd.exe.  Use $env:SystemRoot for a guaranteed path.
+    $cmd = "$env:SystemRoot\System32\cmd.exe"
+
     $proc = Start-Process `
-        -FilePath         "npm" `
-        -ArgumentList     @("run", "dev") `
+        -FilePath         $cmd `
+        -ArgumentList     @("/c", "npm", "run", "dev") `
         -WorkingDirectory $Script:FRONTEND `
         -RedirectStandardOutput $Script:FE_OUT `
         -RedirectStandardError  $Script:FE_ERR `
@@ -517,7 +522,7 @@ function Invoke-Start {
         if ($beOk) {
             $beReady = Wait-ForPort -Port 8000 -Name "Backend" -TimeoutSec 50
             if (-not $beReady) {
-                warn "Backend is slow to start. Check: .local-logs\backend.log"
+                warn "Backend is slow to start. Check: .local-logs\backend-err.log"
             }
         }
     }
@@ -527,7 +532,7 @@ function Invoke-Start {
         if ($feOk) {
             $feReady = Wait-ForPort -Port 3000 -Name "Frontend" -TimeoutSec 90
             if (-not $feReady) {
-                warn "Frontend is slow to start. Check: .local-logs\frontend.log"
+                warn "Frontend is slow to start. Check: .local-logs\frontend-err.log"
             }
         }
     }
@@ -538,13 +543,18 @@ function Invoke-Stop {
     Stop-ServiceByPid -PidFile $Script:BE_PID -Name "Backend"
     Stop-ServiceByPid -PidFile $Script:FE_PID -Name "Frontend"
 
-    # Kill any orphaned processes as a safety net
-    Get-Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -in @("python","python3","node") } |
-        Where-Object {
-            try { $_.MainModule.FileName -match "agi.agent|AGI.agent" } catch { $false }
-        } |
-        ForEach-Object { $_.Kill() }
+    # Kill any orphaned cmd/node processes spawned from this project dir.
+    # Use WMI (Windows-native) to read CommandLine - no MainModule access needed.
+    $projectPath = $Script:ROOT -replace '\\', '\\\\'
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='cmd.exe'" |
+            Where-Object { $_.CommandLine -match [regex]::Escape($Script:ROOT) } |
+            ForEach-Object {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+    } catch {
+        # WMI not available - skip orphan cleanup
+    }
 
     ok "Done"
 }
