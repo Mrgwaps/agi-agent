@@ -58,8 +58,11 @@ $Script:BACKEND   = Join-Path $Script:ROOT "backend"
 $Script:FRONTEND  = Join-Path $Script:ROOT "frontend"
 $Script:VENV      = Join-Path $Script:BACKEND ".venv"
 $Script:LOG_DIR   = Join-Path $Script:ROOT ".local-logs"
-$Script:BE_LOG    = Join-Path $Script:LOG_DIR "backend.log"
-$Script:FE_LOG    = Join-Path $Script:LOG_DIR "frontend.log"
+# Start-Process requires stdout and stderr to be DIFFERENT files on Windows
+$Script:BE_OUT    = Join-Path $Script:LOG_DIR "backend-out.log"
+$Script:BE_ERR    = Join-Path $Script:LOG_DIR "backend-err.log"
+$Script:FE_OUT    = Join-Path $Script:LOG_DIR "frontend-out.log"
+$Script:FE_ERR    = Join-Path $Script:LOG_DIR "frontend-err.log"
 $Script:BE_PID    = Join-Path $Script:ROOT ".be.pid"
 $Script:FE_PID    = Join-Path $Script:ROOT ".fe.pid"
 
@@ -449,11 +452,11 @@ function Start-Backend {
     info "Starting FastAPI backend  ->  http://localhost:8000"
 
     $proc = Start-Process `
-        -FilePath      $exe `
-        -ArgumentList  $args `
+        -FilePath         $exe `
+        -ArgumentList     $args `
         -WorkingDirectory $Script:BACKEND `
-        -RedirectStandardOutput $Script:BE_LOG `
-        -RedirectStandardError  $Script:BE_LOG `
+        -RedirectStandardOutput $Script:BE_OUT `
+        -RedirectStandardError  $Script:BE_ERR `
         -PassThru `
         -WindowStyle Hidden
 
@@ -467,11 +470,11 @@ function Start-Frontend {
     info "Starting Next.js frontend  ->  http://localhost:3000"
 
     $proc = Start-Process `
-        -FilePath     "npm" `
-        -ArgumentList @("run", "dev") `
+        -FilePath         "npm" `
+        -ArgumentList     @("run", "dev") `
         -WorkingDirectory $Script:FRONTEND `
-        -RedirectStandardOutput $Script:FE_LOG `
-        -RedirectStandardError  $Script:FE_LOG `
+        -RedirectStandardOutput $Script:FE_OUT `
+        -RedirectStandardError  $Script:FE_ERR `
         -PassThru `
         -WindowStyle Hidden
 
@@ -572,15 +575,18 @@ function Invoke-Status {
 
 function Show-Logs {
     param([string]$Which = "both")
+    # stdout and stderr land in separate files on Windows; show both
     $files = switch ($Which) {
-        "backend"  { @($Script:BE_LOG) }
-        "frontend" { @($Script:FE_LOG) }
-        default    { @($Script:BE_LOG, $Script:FE_LOG) }
+        "backend"  { @($Script:BE_OUT, $Script:BE_ERR) }
+        "frontend" { @($Script:FE_OUT, $Script:FE_ERR) }
+        default    { @($Script:BE_OUT, $Script:BE_ERR, $Script:FE_OUT, $Script:FE_ERR) }
     }
     $existing = $files | Where-Object { Test-Path $_ }
     if ($existing.Count -eq 0) {
         warn "No log files yet. Start the services first."
+        dim "  Expected: $($Script:LOG_DIR)"
     } else {
+        dim "  Watching: $($existing -join ', ')"
         Get-Content $existing -Tail 40 -Wait
     }
 }
@@ -602,6 +608,7 @@ function Show-Completion {
     Write-Host "$($CG)$($CB)  +------------------------------------------------+$($CX)"
     Write-Host ""
     Write-Host "  $($CD)View logs :$($CX)  $($CY).\run-local.ps1 -Action logs-backend$($CX)"
+    Write-Host "  $($CD)Raw logs  :$($CX)  $($CD)$($Script:LOG_DIR)$($CX)"
     Write-Host "  $($CD)Stop      :$($CX)  $($CY).\run-local.ps1 -Action stop$($CX)"
     Write-Host ""
 
