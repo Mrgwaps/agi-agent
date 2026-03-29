@@ -71,8 +71,9 @@ class Settings(BaseSettings):
     # ── AgentMail (agent email inboxes) ──────────────────────────────────────
     agentmail_api_key: str = Field(default="", alias="AGENTMAIL_API_KEY")
 
-    # ── Ghost.build (hybrid memory / PostgreSQL) ──────────────────────────────
-    ghost_api_key: str = Field(default="", alias="GHOST_API_KEY")
+    # ── Ghost.build (forkable managed Postgres for agents) ────────────────────
+    # Set GHOST_DATABASE_URL to the postgres:// connection string from `ghost database create`
+    ghost_database_url: str = Field(default="", alias="GHOST_DATABASE_URL")
 
     # ── Stripe ────────────────────────────────────────────────────────────────
     stripe_secret_key: str = Field(default="", alias="STRIPE_SECRET_KEY")

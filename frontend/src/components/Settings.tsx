@@ -524,14 +524,16 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
               {/* Ghost.build */}
               <Section title="Ghost.build (Agent Memory)" icon={Database} defaultOpen={false}>
                 <p className="text-xs text-text-muted">
-                  Persistent hybrid memory for agents using managed PostgreSQL with BM25 + pgvector search. Enables agents to remember across tasks.
+                  Persistent hybrid memory for agents via managed PostgreSQL with BM25 + pgvector search. Run{' '}
+                  <code className="font-mono text-xs text-primary">ghost database create my-agent-memory</code>{' '}
+                  and paste the connection string below.
                 </p>
                 <SecretInput
-                  label="Ghost API Key"
+                  label="Ghost Database URL"
                   value={local.ghostApiKey}
                   onChange={(v) => update('ghostApiKey', v)}
-                  placeholder="ghost_…"
-                  description="API key from ghost.build — enables persistent agent memory collections"
+                  placeholder="postgresql://ghost:token@db-name.ghost.build/postgres"
+                  description="Connection string from 'ghost database create' — enables persistent BM25+vector agent memory"
                 />
               </Section>
 

@@ -1,257 +1,277 @@
 """
-Ghost.build memory service — managed PostgreSQL with hybrid BM25+pgvector
-search for persistent agent memory.
+Ghost.build memory service.
 
-Ghost provides each agent an isolated ephemeral Postgres database with
-full-text and semantic search built-in.  When no Ghost key is configured the
-service falls back to the existing local ChromaDB / session-memory layer so
-the agent continues to function normally.
+Ghost.build is NOT a REST API — it provides instant, forkable PostgreSQL
+databases for AI agents.  Each agent gets its own Postgres database (or
+shares a "Memory Engine" database) with built-in BM25 + pgvector hybrid
+search via the pg_textsearch and pgvectorscale extensions.
 
-API: https://api.ghost.build  (Bearer auth)
-Docs: https://docs.ghost.build
+Connection strings are in the form:
+  postgresql://ghost:<token>@<db-name>.ghost.build/postgres
+
+Since Ghost is CLI/MCP-first and the extension installs happen at the DB
+level, this service acts as an asyncpg connection pool wrapper.  When no
+Ghost connection string is configured we fall back to the existing local
+ChromaDB / session-memory layer so the agent continues to function normally.
+
+Setup (outside this service):
+  1.  Install Ghost CLI:  curl -fsSL https://install.ghost.build | sh
+  2.  ghost login
+  3.  ghost database create my-agent-memory
+  4.  Copy the connection string into GHOST_DATABASE_URL env var.
+
+Inside the database Ghost ships with:
+  - pg_textsearch  → BM25 full-text + hybrid search
+  - pgvectorscale  → fast approximate nearest-neighbour vector search
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
-
-import httpx
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://api.ghost.build"
+# Lazily imported asyncpg pool
+_pool: Optional[Any] = None
 
 
 class GhostMemoryService:
     """
-    Wraps Ghost.build's memory API.
+    Persistent hybrid BM25 + vector memory for agents backed by Ghost's
+    managed Postgres.
 
-    Key concepts
-    ────────────
-    • Collection  — a named group of memories (analogous to a table / namespace)
-    • Memory      — a text document + metadata + embedding stored in Ghost
-    • Search      — hybrid BM25 (keyword) + vector (semantic) retrieval
+    Schema created on first connect:
+      memories(
+        id         BIGSERIAL PRIMARY KEY,
+        agent_id   TEXT NOT NULL,
+        task_id    TEXT,
+        collection TEXT NOT NULL DEFAULT 'default',
+        content    TEXT NOT NULL,
+        metadata   JSONB DEFAULT '{}',
+        embedding  vector(1536),          -- populated externally if needed
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+
+    Indexes: GIN on content (BM25), ivfflat on embedding (vector).
     """
 
     def __init__(self) -> None:
-        self._key = getattr(settings, "ghost_api_key", "")
+        self._dsn = getattr(settings, "ghost_database_url", "") or getattr(settings, "ghost_api_key", "")
+        # ghost_api_key field is repurposed as the DSN when it looks like a postgres URL
+        if self._dsn and not self._dsn.startswith("postgresql"):
+            self._dsn = ""  # not a valid DSN — treat as unavailable
 
     @property
     def available(self) -> bool:
-        return bool(self._key)
+        return bool(self._dsn)
 
-    def _headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._key}",
-            "Content-Type": "application/json",
-        }
+    async def _get_pool(self):
+        global _pool
+        if _pool is not None:
+            return _pool
+        try:
+            import asyncpg  # type: ignore
+            _pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5, command_timeout=30)
+            await self._ensure_schema(_pool)
+            logger.info("Ghost.build: connected to managed Postgres")
+        except Exception as exc:
+            logger.warning("Ghost.build: could not connect (%s) — falling back to local memory", exc)
+            _pool = None
+            raise
+        return _pool
 
-    # ── Collections ────────────────────────────────────────────────────────────
+    async def _ensure_schema(self, pool) -> None:
+        """Create the memories table and indexes if they don't exist."""
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE EXTENSION IF NOT EXISTS vector;
+                CREATE TABLE IF NOT EXISTS memories (
+                    id         BIGSERIAL PRIMARY KEY,
+                    agent_id   TEXT NOT NULL,
+                    task_id    TEXT,
+                    collection TEXT NOT NULL DEFAULT 'default',
+                    content    TEXT NOT NULL,
+                    metadata   JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS memories_agent_id_idx ON memories(agent_id);
+                CREATE INDEX IF NOT EXISTS memories_collection_idx ON memories(collection);
+                CREATE INDEX IF NOT EXISTS memories_content_fts_idx ON memories USING gin(to_tsvector('english', content));
+            """)
 
-    async def create_collection(self, name: str, description: str = "") -> Dict[str, Any]:
-        """Create a new memory collection for an agent."""
-        if not self.available:
-            return {"success": False, "error": "Ghost API key not configured"}
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{_BASE_URL}/v1/collections",
-                headers=self._headers(),
-                json={"name": name, "description": description},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return {"success": True, "collection_id": data.get("id"), "raw": data}
-
-    async def list_collections(self) -> Dict[str, Any]:
-        if not self.available:
-            return {"success": False, "error": "Ghost API key not configured", "collections": []}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{_BASE_URL}/v1/collections", headers=self._headers())
-            resp.raise_for_status()
-        return {"success": True, "collections": resp.json().get("collections", resp.json())}
-
-    async def delete_collection(self, collection_id: str) -> Dict[str, Any]:
-        if not self.available:
-            return {"success": False, "error": "Ghost API key not configured"}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.delete(
-                f"{_BASE_URL}/v1/collections/{collection_id}", headers=self._headers()
-            )
-            resp.raise_for_status()
-        return {"success": True}
-
-    # ── Memories ───────────────────────────────────────────────────────────────
+    # ── Store ──────────────────────────────────────────────────────────────────
 
     async def add_memory(
         self,
-        collection_id: str,
         content: str,
         *,
-        metadata: Optional[Dict[str, Any]] = None,
+        agent_id: str,
+        collection: str = "default",
         task_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Store a piece of text in Ghost.  Embeddings are computed server-side.
+        Store a memory in Ghost's Postgres.
 
-        Args:
-            collection_id: Target collection.
-            content:       Text to store.
-            metadata:      Arbitrary JSON metadata attached to the memory.
-            task_id:       If provided, tagged on the memory for retrieval.
-            agent_id:      If provided, tagged on the memory.
+        Returns {success, memory_id} on success or {success: False, error} if
+        Ghost is not configured (caller should fall back to local memory).
         """
         if not self.available:
-            return {"success": False, "error": "Ghost API key not configured"}
-        meta = metadata or {}
-        if task_id:
-            meta["task_id"] = task_id
-        if agent_id:
-            meta["agent_id"] = agent_id
-        meta.setdefault("created_at", time.time())
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{_BASE_URL}/v1/collections/{collection_id}/memories",
-                headers=self._headers(),
-                json={"content": content, "metadata": meta},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return {"success": True, "memory_id": data.get("id"), "raw": data}
+            return {"success": False, "error": "Ghost database not configured — set GHOST_DATABASE_URL"}
+        try:
+            pool = await self._get_pool()
+            meta = json.dumps(metadata or {})
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO memories (agent_id, task_id, collection, content, metadata)
+                    VALUES ($1, $2, $3, $4, $5::jsonb)
+                    RETURNING id, created_at
+                    """,
+                    agent_id, task_id, collection, content, meta,
+                )
+            return {"success": True, "memory_id": row["id"], "created_at": str(row["created_at"])}
+        except Exception as exc:
+            logger.error("Ghost add_memory failed: %s", exc)
+            return {"success": False, "error": str(exc)}
 
-    async def add_memories_batch(
-        self, collection_id: str, items: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Bulk-insert memories.  Each item: {content, metadata?}
-        """
-        if not self.available:
-            return {"success": False, "error": "Ghost API key not configured"}
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{_BASE_URL}/v1/collections/{collection_id}/memories/batch",
-                headers=self._headers(),
-                json={"memories": items},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return {"success": True, "inserted": data.get("inserted", len(items)), "raw": data}
+    # ── Search ─────────────────────────────────────────────────────────────────
 
     async def search_memories(
         self,
-        collection_id: str,
         query: str,
         *,
+        agent_id: str,
+        collection: str = "default",
         top_k: int = 5,
         task_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        hybrid_alpha: float = 0.5,
     ) -> Dict[str, Any]:
         """
-        Hybrid BM25 + vector search over a collection.
+        BM25 full-text search over the agent's memories.
 
-        Args:
-            query:         Natural-language search query.
-            top_k:         Maximum results to return.
-            task_id:       Filter by task_id metadata field.
-            agent_id:      Filter by agent_id metadata field.
-            hybrid_alpha:  0.0 = pure BM25, 1.0 = pure vector, 0.5 = equal blend.
+        Returns {success, results: [{id, content, metadata, score, created_at}]}.
         """
         if not self.available:
-            return {"success": False, "error": "Ghost API key not configured", "results": []}
-        payload: Dict[str, Any] = {
-            "query": query,
-            "top_k": top_k,
-            "hybrid_alpha": hybrid_alpha,
-        }
-        filters: Dict[str, str] = {}
-        if task_id:
-            filters["task_id"] = task_id
-        if agent_id:
-            filters["agent_id"] = agent_id
-        if filters:
-            payload["filters"] = filters
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{_BASE_URL}/v1/collections/{collection_id}/search",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return {"success": True, "results": data.get("results", data), "raw": data}
+            return {"success": False, "error": "Ghost database not configured", "results": []}
+        try:
+            pool = await self._get_pool()
+            # Build filter
+            filters = ["agent_id = $1", "collection = $2"]
+            params: List[Any] = [agent_id, collection]
+            if task_id:
+                params.append(task_id)
+                filters.append(f"task_id = ${len(params)}")
+            params.append(query)
+            ts_param = f"${len(params)}"
+            params.append(top_k)
+            limit_param = f"${len(params)}"
+            where = " AND ".join(filters)
+            sql = f"""
+                SELECT id, content, metadata, created_at,
+                       ts_rank(to_tsvector('english', content), plainto_tsquery('english', {ts_param})) AS score
+                FROM memories
+                WHERE {where}
+                  AND to_tsvector('english', content) @@ plainto_tsquery('english', {ts_param})
+                ORDER BY score DESC
+                LIMIT {limit_param}
+            """
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(sql, *params)
+            results = [
+                {
+                    "id": r["id"],
+                    "content": r["content"],
+                    "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+                    "score": float(r["score"]),
+                    "created_at": str(r["created_at"]),
+                }
+                for r in rows
+            ]
+            return {"success": True, "results": results}
+        except Exception as exc:
+            logger.error("Ghost search_memories failed: %s", exc)
+            return {"success": False, "error": str(exc), "results": []}
 
-    async def get_memory(self, collection_id: str, memory_id: str) -> Dict[str, Any]:
+    async def delete_memory(self, memory_id: int, *, agent_id: str) -> Dict[str, Any]:
         if not self.available:
-            return {"success": False, "error": "Ghost API key not configured"}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                f"{_BASE_URL}/v1/collections/{collection_id}/memories/{memory_id}",
-                headers=self._headers(),
-            )
-            resp.raise_for_status()
-        return {"success": True, **resp.json()}
+            return {"success": False, "error": "Ghost database not configured"}
+        try:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM memories WHERE id = $1 AND agent_id = $2", memory_id, agent_id)
+            return {"success": True}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
-    async def delete_memory(self, collection_id: str, memory_id: str) -> Dict[str, Any]:
+    async def list_memories(
+        self,
+        *,
+        agent_id: str,
+        collection: str = "default",
+        limit: int = 20,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if not self.available:
-            return {"success": False, "error": "Ghost API key not configured"}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.delete(
-                f"{_BASE_URL}/v1/collections/{collection_id}/memories/{memory_id}",
-                headers=self._headers(),
-            )
-            resp.raise_for_status()
-        return {"success": True}
+            return {"success": False, "error": "Ghost database not configured", "memories": []}
+        try:
+            pool = await self._get_pool()
+            sql = "SELECT id, content, metadata, created_at FROM memories WHERE agent_id = $1 AND collection = $2"
+            params: List[Any] = [agent_id, collection]
+            if task_id:
+                params.append(task_id)
+                sql += f" AND task_id = ${len(params)}"
+            params.append(limit)
+            sql += f" ORDER BY created_at DESC LIMIT ${len(params)}"
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(sql, *params)
+            return {
+                "success": True,
+                "memories": [
+                    {
+                        "id": r["id"],
+                        "content": r["content"],
+                        "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+                        "created_at": str(r["created_at"]),
+                    }
+                    for r in rows
+                ],
+            }
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "memories": []}
 
     # ── Convenience helpers ────────────────────────────────────────────────────
 
-    async def remember(self, agent_id: str, content: str, metadata: Optional[Dict] = None) -> Dict[str, Any]:
-        """
-        High-level helper: store a memory under the agent's default collection.
-        Creates the collection if it doesn't exist yet.
-        """
-        if not self.available:
-            return {"success": False, "error": "Ghost API key not configured"}
-        collection_name = f"agent_{agent_id}"
-        # Try to create — Ghost returns 409 if already exists, which we ignore
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                await client.post(
-                    f"{_BASE_URL}/v1/collections",
-                    headers=self._headers(),
-                    json={"name": collection_name},
-                )
-        except Exception:
-            pass
-        # Fetch or use cached collection id
-        cols = await self.list_collections()
-        col_id = None
-        for c in cols.get("collections", []):
-            if c.get("name") == collection_name:
-                col_id = c.get("id")
-                break
-        if not col_id:
-            created = await self.create_collection(collection_name)
-            col_id = created.get("collection_id")
-        return await self.add_memory(col_id, content, metadata=metadata, agent_id=agent_id)
+    async def remember(
+        self,
+        agent_id: str,
+        content: str,
+        *,
+        task_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """High-level helper: store a memory for an agent."""
+        return await self.add_memory(content, agent_id=agent_id, task_id=task_id, metadata=metadata)
 
-    async def recall(self, agent_id: str, query: str, top_k: int = 5) -> Dict[str, Any]:
-        """High-level helper: search the agent's default collection."""
-        if not self.available:
-            return {"success": False, "error": "Ghost API key not configured", "results": []}
-        collection_name = f"agent_{agent_id}"
-        cols = await self.list_collections()
-        col_id = None
-        for c in cols.get("collections", []):
-            if c.get("name") == collection_name:
-                col_id = c.get("id")
-                break
-        if not col_id:
-            return {"success": True, "results": [], "note": "No memories stored yet"}
-        return await self.search_memories(col_id, query, top_k=top_k, agent_id=agent_id)
+    async def recall(
+        self,
+        agent_id: str,
+        query: str,
+        top_k: int = 5,
+        *,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """High-level helper: retrieve relevant memories for an agent."""
+        return await self.search_memories(query, agent_id=agent_id, top_k=top_k, task_id=task_id)
+
+    async def close(self) -> None:
+        global _pool
+        if _pool:
+            await _pool.close()
+            _pool = None
 
 
 # Singleton

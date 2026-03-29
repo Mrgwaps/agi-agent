@@ -122,19 +122,19 @@ class AgentMailService:
         *,
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
-        reply_to_id: Optional[str] = None,
+        reply_to: Optional[List[str]] = None,
         html: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send an email from the given inbox.
 
         Args:
-            inbox_id:    Source inbox.
-            to:          List of recipient addresses.
-            subject:     Email subject line.
-            body:        Plain-text body.
-            html:        Optional HTML body.
-            reply_to_id: Message ID to thread as a reply.
+            inbox_id:  Source inbox.
+            to:        List of recipient addresses.
+            subject:   Email subject line.
+            body:      Plain-text body.
+            html:      Optional HTML body.
+            reply_to:  Optional reply-to addresses.
         """
         if not self.available:
             return {"success": False, "error": "AgentMail key not configured"}
@@ -149,17 +149,67 @@ class AgentMailService:
             payload["cc"] = cc
         if bcc:
             payload["bcc"] = bcc
-        if reply_to_id:
-            payload["reply_to_id"] = reply_to_id
+        if reply_to:
+            payload["reply_to"] = reply_to
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{_BASE_URL}/inboxes/{inbox_id}/messages",
+                f"{_BASE_URL}/inboxes/{inbox_id}/messages/send",
                 headers=self._headers(),
                 json=payload,
             )
             resp.raise_for_status()
             data = resp.json()
-        return {"success": True, "message_id": data.get("id") or data.get("message_id"), "raw": data}
+        return {
+            "success": True,
+            "message_id": data.get("message_id"),
+            "thread_id": data.get("thread_id"),
+            "raw": data,
+        }
+
+    async def reply_to_message(
+        self,
+        inbox_id: str,
+        message_id: str,
+        body: str,
+        *,
+        subject: Optional[str] = None,
+        to: Optional[List[str]] = None,
+        cc: Optional[List[str]] = None,
+        html: Optional[str] = None,
+        reply_all: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Reply to an existing message (preserves threading).
+
+        Args:
+            reply_all: If True uses reply-all endpoint.
+        """
+        if not self.available:
+            return {"success": False, "error": "AgentMail key not configured"}
+        payload: Dict[str, Any] = {"text": body}
+        if subject:
+            payload["subject"] = subject
+        if to:
+            payload["to"] = to
+        if cc:
+            payload["cc"] = cc
+        if html:
+            payload["html"] = html
+        endpoint = "reply-all" if reply_all else "reply"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{_BASE_URL}/inboxes/{inbox_id}/messages/{message_id}/{endpoint}",
+                headers=self._headers(),
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        return {
+            "success": True,
+            "message_id": data.get("message_id"),
+            "thread_id": data.get("thread_id"),
+            "raw": data,
+        }
 
     async def delete_message(self, inbox_id: str, message_id: str) -> Dict[str, Any]:
         if not self.available:
