@@ -196,10 +196,11 @@ class PlannerService:
     def _apply_constraints(
         self, steps: List[TaskStep], constraints: TaskConstraints
     ) -> List[TaskStep]:
+        _web_tools = {"web_search", "hyperbrowser", "web_researcher", "enhanced_search", "image_generator"}
         allowed: List[TaskStep] = []
         for step in steps:
             tool = step.tool_used
-            if tool in ("web_search", "hyperbrowser", "web_researcher") and not constraints.allowWeb:
+            if tool in _web_tools and not constraints.allowWeb:
                 logger.info("Removing step (web not allowed): %s", step.description)
                 continue
             if tool == "filesystem" and not constraints.allowFileSystem:
@@ -240,14 +241,18 @@ class PlannerService:
 _PLAN_FORMAT_INSTRUCTIONS = """
 Return ONLY a valid JSON array. Each element must have exactly these fields:
 - description: string (what to do — be specific and verifiable)
-- tool_to_use: string (one of: content_writer, web_researcher, web_search, filesystem, code_executor, json_generator, hyperbrowser, llm_only)
+- tool_to_use: string (one of: content_writer, web_researcher, enhanced_search, web_search, filesystem, code_executor, json_generator, hyperbrowser, image_generator, location, hf_inference, llm_only)
 - expected_output: string (what success looks like — specific and measurable)
 - requires_approval: boolean
 
 Tool selection guide:
 - content_writer: writing ebook chapters, articles, guides, reports — any substantial writing
-- web_researcher: research tasks needing multiple sources and synthesis
-- web_search: quick fact lookups, finding specific URLs
+- web_researcher: deep research tasks needing multiple sources and synthesis
+- enhanced_search: quick fact lookups, current events, finding specific pages (uses SerpAPI + DDG)
+- web_search: basic web search (use enhanced_search for better results)
+- image_generator: create images or short videos from text prompts (WaveSpeed AI / Flux models)
+- location: geocoding, places search, directions, distance matrix (Google Maps)
+- hf_inference: run open-source AI models — text generation, classification, summarization
 - code_executor: running or testing code
 - filesystem: reading/writing files
 - llm_only: reasoning, analysis, synthesis that doesn't need external tools

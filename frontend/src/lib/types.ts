@@ -209,6 +209,11 @@ export interface Settings {
   requireApprovalWebRequests: boolean;
   maxRetriesPerStep: number;
   fallbackToBasicScraping: boolean;
+  // External API keys
+  wavespeedApiKey: string;
+  googleMapsApiKey: string;
+  huggingfaceApiKey: string;
+  serpApiKey: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -224,6 +229,10 @@ export const DEFAULT_SETTINGS: Settings = {
   requireApprovalWebRequests: false,
   maxRetriesPerStep: 3,
   fallbackToBasicScraping: true,
+  wavespeedApiKey: '',
+  googleMapsApiKey: '',
+  huggingfaceApiKey: '',
+  serpApiKey: '',
 };
 
 // ============================================================

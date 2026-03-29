@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     hyperbrowser_api_key: str = Field(default="", alias="HYPERBROWSER_API_KEY")
     hyperbrowser_base_url: str = "https://api.hyperbrowser.ai"
 
+    # ── WaveSpeed AI (image / video generation) ───────────────────────────────
+    wavespeed_api_key: str = Field(default="", alias="WAVESPEED_API_KEY")
+    wavespeed_base_url: str = "https://api.wavespeed.ai/api/v2"
+
+    # ── Google Maps ───────────────────────────────────────────────────────────
+    google_maps_api_key: str = Field(default="", alias="GOOGLE_MAPS_API_KEY")
+
+    # ── Hugging Face ──────────────────────────────────────────────────────────
+    huggingface_api_key: str = Field(default="", alias="HUGGINGFACE_API_KEY")
+    huggingface_base_url: str = "https://api-inference.huggingface.co"
+
+    # ── SerpAPI ───────────────────────────────────────────────────────────────
+    serp_api_key: str = Field(default="", alias="SERP_API_KEY")
+
     # ── Database ──────────────────────────────────────────────────────────────
     postgres_url: str = Field(
         default="postgresql://agi:agi@localhost:5432/agi_agent",

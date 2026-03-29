@@ -17,6 +17,7 @@ import {
   Zap,
   ChevronDown,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { testOllamaConnection } from '@/lib/api';
@@ -402,6 +403,42 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
                   description="Use simple HTTP scraping if Hyperbrowser is unavailable"
                   value={local.fallbackToBasicScraping}
                   onChange={(v) => update('fallbackToBasicScraping', v)}
+                />
+              </Section>
+
+              {/* External APIs */}
+              <Section title="External APIs" icon={Sparkles} defaultOpen={false}>
+                <p className="text-xs text-text-muted">
+                  Optional integrations that expand the agent&apos;s capabilities. Each is used only when relevant
+                  to the task, with free tiers explored first.
+                </p>
+                <SecretInput
+                  label="WaveSpeed AI (Image / Video)"
+                  value={local.wavespeedApiKey}
+                  onChange={(v) => update('wavespeedApiKey', v)}
+                  placeholder="your-wavespeed-api-key"
+                  description="High-quality image & video generation via WaveSpeed AI (wavespeed.ai)"
+                />
+                <SecretInput
+                  label="Google Maps API"
+                  value={local.googleMapsApiKey}
+                  onChange={(v) => update('googleMapsApiKey', v)}
+                  placeholder="AIza…"
+                  description="Geocoding, places search, distance matrix, and directions"
+                />
+                <SecretInput
+                  label="Hugging Face Inference"
+                  value={local.huggingfaceApiKey}
+                  onChange={(v) => update('huggingfaceApiKey', v)}
+                  placeholder="hf_…"
+                  description="Open-source models for text, code, classification, and embeddings"
+                />
+                <SecretInput
+                  label="SerpAPI (Web Search)"
+                  value={local.serpApiKey}
+                  onChange={(v) => update('serpApiKey', v)}
+                  placeholder="your-serpapi-key"
+                  description="Google/Bing search results. Falls back to DuckDuckGo when not set."
                 />
               </Section>
 
