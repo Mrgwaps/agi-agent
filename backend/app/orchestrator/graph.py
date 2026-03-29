@@ -19,6 +19,7 @@ from app.models.task import (
 from app.orchestrator.executor import ExecutorService
 from app.orchestrator.planner import planner_service
 from app.services.openrouter import ModelQuality, infer_quality, openrouter_client
+from app.services.skill_router import get_persona
 
 logger = logging.getLogger(__name__)
 
@@ -347,16 +348,11 @@ class OrchestratorGraph:
             if s.result
         )
 
+        persona = get_persona(state.goal)
         synthesis_messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a world-class expert delivering a polished, professional final result. "
-                    "Synthesize all the research and work from the completed steps into a single, "
-                    "complete, high-quality deliverable that fully satisfies the user's goal. "
-                    "Do not summarize — produce the actual deliverable. "
-                    "Be comprehensive, well-structured, and professional."
-                ),
+                "content": persona.delivery_system,
             },
             {
                 "role": "user",

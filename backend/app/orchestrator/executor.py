@@ -12,6 +12,7 @@ import httpx
 from app.models.event import AgentEvent, EventType
 from app.models.task import StepStatus, TaskStep, TaskState
 from app.services.openrouter import ModelQuality, infer_quality, openrouter_client
+from app.services.skill_router import SkillDomain, get_persona
 from app.tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -171,10 +172,10 @@ class ExecutorService:
     # ── LLM-only execution ───────────────────────────────────────────────────
 
     async def _llm_only_step(self, step: TaskStep, state: TaskState) -> str:
-        """Execute a step purely via LLM reasoning, using quality-appropriate model."""
+        """Execute a step via LLM using the domain-specific skill persona."""
+        persona = get_persona(state.goal)
         history = self._format_history(state)
 
-        # Determine if this is the final (delivery) step
         is_final = (state.currentStep == len(state.plan) - 1)
         quality = infer_quality(
             step_description=step.description,
@@ -182,7 +183,6 @@ class ExecutorService:
             is_final_step=is_final,
         )
 
-        # Pick task type for model routing
         desc_lower = step.description.lower()
         if any(k in desc_lower for k in ("code", "script", "function", "implement", "program")):
             task_type = "code"
@@ -195,25 +195,13 @@ class ExecutorService:
         else:
             task_type = "general"
 
-        # System prompt varies by quality — premium gets a more authoritative persona
-        if quality == ModelQuality.PREMIUM:
-            system_content = (
-                "You are an expert AI assistant producing high-quality, professional output. "
-                "Be thorough, well-structured, and authoritative. "
-                "Deliver complete, polished work — not outlines or placeholders."
-            )
-            max_tokens = 4096
-        else:
-            system_content = (
-                "You are an AI assistant executing a task step-by-step. "
-                "Complete the current step using your knowledge. "
-                "Be thorough and concrete."
-            )
-            max_tokens = 2048
+        # Use the persona's executor system prompt — domain-specific intelligence
+        system_content = persona.executor_system
+        max_tokens = persona.max_tokens_step if quality != ModelQuality.PREMIUM else persona.max_tokens_delivery
 
         logger.info(
-            "Step '%s…' → quality=%s model_type=%s final=%s",
-            step.description[:60], quality.value, task_type, is_final,
+            "LLM step '%s…' → persona=%s quality=%s task=%s final=%s",
+            step.description[:60], persona.domain.value, quality.value, task_type, is_final,
         )
 
         messages = [
@@ -221,10 +209,10 @@ class ExecutorService:
             {
                 "role": "user",
                 "content": (
-                    f"Task goal: {state.goal}\n\n"
-                    f"Completed steps so far:\n{history}\n\n"
-                    f"Current step: {step.description}\n\n"
-                    "Complete this step:"
+                    f"Overall goal: {state.goal}\n\n"
+                    f"Work completed so far:\n{history}\n\n"
+                    f"Current step to complete: {step.description}\n\n"
+                    "Complete this step fully and concretely:"
                 ),
             },
         ]

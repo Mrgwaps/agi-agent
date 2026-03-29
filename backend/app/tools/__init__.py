@@ -8,6 +8,8 @@ from app.tools.web_search import WebSearchTool
 from app.tools.hyperbrowser import HyperbrowserTool
 from app.tools.code_executor import CodeExecutorTool
 from app.tools.json_generator import JsonGeneratorTool
+from app.tools.content_writer import ContentWriterTool
+from app.tools.web_researcher import WebResearcherTool
 
 __all__ = [
     "BaseTool",
@@ -17,4 +19,6 @@ __all__ = [
     "HyperbrowserTool",
     "CodeExecutorTool",
     "JsonGeneratorTool",
+    "ContentWriterTool",
+    "WebResearcherTool",
 ]
