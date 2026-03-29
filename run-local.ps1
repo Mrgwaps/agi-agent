@@ -365,9 +365,27 @@ function Install-FrontendDeps {
     if (-not (Test-Path $nm)) {
         info "Installing npm packages (first run takes a minute)..."
         Push-Location $Script:FRONTEND
-        npm install
+
+        # npm writes deprecation warnings to stderr; with $ErrorActionPreference="Stop"
+        # PowerShell treats any stderr output from native commands as a fatal error.
+        # Temporarily relax it so warnings are printed but don't abort the script.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        npm install 2>&1 | ForEach-Object {
+            # Show warn/error lines in yellow, info in dim, everything else normal
+            if ($_ -match "^npm (warn|error)") { Write-Host "  $($CY)$_$($CX)" }
+            else                               { Write-Host "  $($CD)$_$($CX)" }
+        }
+        $npmExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+
         Pop-Location
-        ok "npm packages installed"
+
+        if ($npmExit -eq 0) {
+            ok "npm packages installed"
+        } else {
+            warn "npm install finished with exit code $npmExit - check output above"
+        }
     } else {
         ok "node_modules already present"
     }
