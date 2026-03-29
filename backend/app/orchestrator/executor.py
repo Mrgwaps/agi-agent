@@ -11,7 +11,7 @@ import httpx
 
 from app.models.event import AgentEvent, EventType
 from app.models.task import StepStatus, TaskStep, TaskState
-from app.services.openrouter import openrouter_client
+from app.services.openrouter import ModelQuality, infer_quality, openrouter_client
 from app.tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -171,17 +171,53 @@ class ExecutorService:
     # ── LLM-only execution ───────────────────────────────────────────────────
 
     async def _llm_only_step(self, step: TaskStep, state: TaskState) -> str:
-        """Execute a step purely via LLM reasoning."""
+        """Execute a step purely via LLM reasoning, using quality-appropriate model."""
         history = self._format_history(state)
+
+        # Determine if this is the final (delivery) step
+        is_final = (state.currentStep == len(state.plan) - 1)
+        quality = infer_quality(
+            step_description=step.description,
+            goal=state.goal,
+            is_final_step=is_final,
+        )
+
+        # Pick task type for model routing
+        desc_lower = step.description.lower()
+        if any(k in desc_lower for k in ("code", "script", "function", "implement", "program")):
+            task_type = "code"
+        elif any(k in desc_lower for k in ("write", "draft", "compose", "ebook", "guide", "report")):
+            task_type = "writing"
+        elif any(k in desc_lower for k in ("synthesize", "compile", "deliver", "final")):
+            task_type = "synthesis"
+        elif any(k in desc_lower for k in ("research", "analyze", "analyse", "summarize")):
+            task_type = "analysis"
+        else:
+            task_type = "general"
+
+        # System prompt varies by quality — premium gets a more authoritative persona
+        if quality == ModelQuality.PREMIUM:
+            system_content = (
+                "You are an expert AI assistant producing high-quality, professional output. "
+                "Be thorough, well-structured, and authoritative. "
+                "Deliver complete, polished work — not outlines or placeholders."
+            )
+            max_tokens = 4096
+        else:
+            system_content = (
+                "You are an AI assistant executing a task step-by-step. "
+                "Complete the current step using your knowledge. "
+                "Be thorough and concrete."
+            )
+            max_tokens = 2048
+
+        logger.info(
+            "Step '%s…' → quality=%s model_type=%s final=%s",
+            step.description[:60], quality.value, task_type, is_final,
+        )
+
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are an AI assistant executing a task step-by-step. "
-                    "Complete the current step using your knowledge. "
-                    "Be thorough and concrete."
-                ),
-            },
+            {"role": "system", "content": system_content},
             {
                 "role": "user",
                 "content": (
@@ -196,9 +232,9 @@ class ExecutorService:
         t0 = time.monotonic()
         text, model, cost = await openrouter_client.chat_completion(
             messages=messages,
-            task_type="general",
-            force_free=True,
-            max_tokens=2048,
+            task_type=task_type,
+            quality=quality,
+            max_tokens=max_tokens,
         )
         latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -248,10 +284,11 @@ class ExecutorService:
         ]
 
         try:
+            # Tool input building is always cheap/free — it's just JSON formatting
             text, model, cost = await openrouter_client.chat_completion(
                 messages=messages,
                 task_type="structured",
-                force_free=True,
+                quality=ModelQuality.FREE,
                 max_tokens=512,
             )
             step.cost_usd = (step.cost_usd or 0) + cost

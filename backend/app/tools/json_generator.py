@@ -68,7 +68,7 @@ class JsonGeneratorTool(BaseTool):
         output_format: str,
         instructions: str,
     ) -> Dict[str, Any]:
-        from app.services.openrouter import openrouter_client
+        from app.services.openrouter import ModelQuality, openrouter_client
 
         # Serialise input data
         if isinstance(data, (dict, list)):
@@ -117,7 +117,7 @@ class JsonGeneratorTool(BaseTool):
         text, model, cost = await openrouter_client.chat_completion(
             messages=messages,
             task_type="structured",
-            force_free=True,
+            quality=ModelQuality.FREE,
             max_tokens=4096,
         )
 

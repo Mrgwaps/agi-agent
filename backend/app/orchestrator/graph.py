@@ -18,7 +18,7 @@ from app.models.task import (
 )
 from app.orchestrator.executor import ExecutorService
 from app.orchestrator.planner import planner_service
-from app.services.openrouter import openrouter_client
+from app.services.openrouter import ModelQuality, infer_quality, openrouter_client
 
 logger = logging.getLogger(__name__)
 
@@ -215,10 +215,11 @@ class OrchestratorGraph:
                     ),
                 },
             ]
+            # Verification is a cheap binary check — always use free
             verdict, _, _ = await openrouter_client.chat_completion(
                 messages=messages,
                 task_type="general",
-                force_free=True,
+                quality=ModelQuality.FREE,
                 max_tokens=10,
             )
             if "FAIL" in verdict.upper():
@@ -321,7 +322,7 @@ class OrchestratorGraph:
         return state
 
     async def _deliver_node(self, state: TaskState) -> TaskState:
-        """Compile the final answer and mark task complete."""
+        """Synthesize the final answer using the best available model, then mark complete."""
         completed = [s for s in state.plan if s.status == StepStatus.completed]
         failed = [s for s in state.plan if s.status == StepStatus.failed]
 
@@ -334,20 +335,54 @@ class OrchestratorGraph:
             ))
             return state
 
-        # Synthesize final answer
+        self._emit(self._event(
+            EventType.thinking,
+            {"message": "Synthesizing final deliverable with premium model…"},
+        ))
+
+        # Build synthesis prompt from all completed step results
+        steps_context = "\n\n".join(
+            f"### Step {i}: {s.description}\n{str(s.result)[:1500]}"
+            for i, s in enumerate(completed, 1)
+            if s.result
+        )
+
+        synthesis_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a world-class expert delivering a polished, professional final result. "
+                    "Synthesize all the research and work from the completed steps into a single, "
+                    "complete, high-quality deliverable that fully satisfies the user's goal. "
+                    "Do not summarize — produce the actual deliverable. "
+                    "Be comprehensive, well-structured, and professional."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Original goal: {state.goal}\n\n"
+                    f"Work completed so far:\n{steps_context}\n\n"
+                    "Produce the final, complete deliverable now:"
+                ),
+            },
+        ]
+
         try:
-            summary = self._summarize_results(completed, state.goal)
-            state.result = summary
+            synthesis, model, cost = await openrouter_client.chat_completion(
+                messages=synthesis_messages,
+                task_type="synthesis",
+                quality=ModelQuality.PREMIUM,
+                max_tokens=8192,
+                temperature=0.6,
+            )
+            state.result = synthesis
+            state.total_cost_usd += cost
+            state.model_used = model
+            logger.info("Final synthesis by %s (cost=$%.6f)", model, cost)
         except Exception as exc:
-            logger.warning("deliver_node summary failed: %s", exc)
-            state.result = {
-                "completed_steps": len(completed),
-                "failed_steps": len(failed),
-                "results": [
-                    {"step": s.description, "result": str(s.result)[:200]}
-                    for s in completed
-                ],
-            }
+            logger.warning("deliver_node LLM synthesis failed, using raw concat: %s", exc)
+            state.result = self._summarize_results(completed, state.goal)
 
         state.status = TaskStatus.completed
         state.updated_at = datetime.utcnow()
