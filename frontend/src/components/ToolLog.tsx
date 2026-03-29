@@ -73,23 +73,28 @@ function extractToolCalls(events: AgentEvent[]): ToolCall[] {
       latencyMs?: number;
     };
 
-    const callId = p.callId || event.id;
-    const toolName = p.toolName || 'unknown';
+    // Backend uses step_id to correlate tool_called / tool_result events
+    const callId = (p as Record<string, unknown>).callId as string
+      || (p as Record<string, unknown>).step_id as string
+      || event.id;
+    const toolName = p.toolName || (p as Record<string, unknown>).tool as string || 'unknown';
 
     if (event.type === EventType.TOOL_CALL_STARTED) {
       calls.set(callId, {
         id: callId,
         toolName,
-        input: p.input || {},
+        input: (p.input as Record<string, unknown>) || {},
         status: 'running',
         startedAt: event.timestamp,
       });
     } else if (event.type === EventType.TOOL_CALL_COMPLETED) {
       const existing = calls.get(callId);
+      // Backend sends result_preview instead of output
+      const output = p.output ?? (p as Record<string, unknown>).result_preview;
       if (existing) {
         calls.set(callId, {
           ...existing,
-          output: p.output,
+          output,
           status: 'completed',
           completedAt: event.timestamp,
           latencyMs: p.latencyMs,
@@ -99,7 +104,7 @@ function extractToolCalls(events: AgentEvent[]): ToolCall[] {
           id: callId,
           toolName,
           input: {},
-          output: p.output,
+          output,
           status: 'completed',
           startedAt: event.timestamp,
           completedAt: event.timestamp,

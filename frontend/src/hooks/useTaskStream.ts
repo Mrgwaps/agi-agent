@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { streamEvents } from '@/lib/api';
 import { useStore } from '@/lib/store';
-import { type AgentEvent, EventType, TaskStatus, StepStatus } from '@/lib/types';
+import { type AgentEvent, type TaskStep, EventType, TaskStatus, StepStatus } from '@/lib/types';
 
 interface UseTaskStreamResult {
   events: AgentEvent[];
@@ -26,6 +26,14 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
     taskId ? (s.events[taskId] || []) : []
   );
 
+  // Helper: find step index by step_id, fallback to currentStep
+  function findStepIndex(taskId: string, stepId: string | undefined): number {
+    const task = getTasks().tasks[taskId];
+    if (!task?.plan || !stepId) return task?.currentStepIndex ?? 0;
+    const idx = task.plan.findIndex((s) => s.id === stepId);
+    return idx >= 0 ? idx : (task.currentStepIndex ?? 0);
+  }
+
   const handleEvent = useCallback(
     (event: AgentEvent) => {
       if (!taskId) return;
@@ -33,8 +41,14 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
       addEvent(taskId, event);
       updateCost(taskId, event);
 
-      // Sync task state from events
       switch (event.type) {
+        // ── Thinking: agent has started processing ──────────────────────────
+        case EventType.THINKING: {
+          updateTask(taskId, { status: TaskStatus.PLANNING });
+          break;
+        }
+
+        // ── Task lifecycle ──────────────────────────────────────────────────
         case EventType.TASK_STARTED:
           updateTask(taskId, {
             status: TaskStatus.RUNNING,
@@ -77,22 +91,25 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
           setIsConnected(false);
           break;
 
+        // ── Plan created ────────────────────────────────────────────────────
         case EventType.PLAN_CREATED: {
-          const plan = event.payload.plan as import('@/lib/types').TaskStep[] | undefined;
-          if (plan) {
+          // normalizeEvent maps payload.steps → payload.plan (normalized TaskStep[])
+          const plan = event.payload.plan as TaskStep[] | undefined;
+          if (plan && plan.length > 0) {
             updateTask(taskId, { plan, status: TaskStatus.PLANNING });
           }
           break;
         }
 
+        // ── Step events ─────────────────────────────────────────────────────
         case EventType.STEP_STARTED: {
-          const stepIndex = event.stepIndex ?? (event.payload.stepIndex as number) ?? 0;
-          updateTask(taskId, { currentStepIndex: stepIndex, status: TaskStatus.RUNNING });
-          // Update the step status in plan
+          const stepId = event.payload.step_id as string | undefined;
+          const stepIdx = findStepIndex(taskId, stepId);
+          updateTask(taskId, { currentStepIndex: stepIdx, status: TaskStatus.RUNNING });
           const task = getTasks().tasks[taskId];
           if (task?.plan) {
             const plan = task.plan.map((step, i) =>
-              i === stepIndex
+              i === stepIdx
                 ? { ...step, status: StepStatus.RUNNING, startedAt: event.timestamp }
                 : step
             );
@@ -102,11 +119,12 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
         }
 
         case EventType.STEP_COMPLETED: {
-          const stepIndex = event.stepIndex ?? (event.payload.stepIndex as number) ?? 0;
+          const stepId = event.payload.step_id as string | undefined;
+          const stepIdx = findStepIndex(taskId, stepId);
           const task = getTasks().tasks[taskId];
           if (task?.plan) {
             const plan = task.plan.map((step, i) =>
-              i === stepIndex
+              i === stepIdx
                 ? {
                     ...step,
                     status: StepStatus.COMPLETED,
@@ -121,11 +139,12 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
         }
 
         case EventType.STEP_FAILED: {
-          const stepIndex = event.stepIndex ?? (event.payload.stepIndex as number) ?? 0;
+          const stepId = event.payload.step_id as string | undefined;
+          const stepIdx = findStepIndex(taskId, stepId);
           const task = getTasks().tasks[taskId];
           if (task?.plan) {
             const plan = task.plan.map((step, i) =>
-              i === stepIndex
+              i === stepIdx
                 ? {
                     ...step,
                     status: StepStatus.FAILED,
@@ -139,6 +158,36 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
           break;
         }
 
+        // ── Error event (executor emits this on step failure) ───────────────
+        case EventType.ERROR: {
+          const stepId = event.payload.step_id as string | undefined;
+          if (stepId) {
+            const stepIdx = findStepIndex(taskId, stepId);
+            const task = getTasks().tasks[taskId];
+            if (task?.plan) {
+              const plan = task.plan.map((step, i) =>
+                i === stepIdx
+                  ? {
+                      ...step,
+                      status: StepStatus.FAILED,
+                      completedAt: event.timestamp,
+                      error: (event.payload.error as string) || 'Error',
+                    }
+                  : step
+              );
+              updateTask(taskId, { plan });
+            }
+          }
+          break;
+        }
+
+        // ── Replan: new plan replacing remaining steps ──────────────────────
+        case EventType.REPLAN: {
+          // Backend will emit a new plan_created event shortly; nothing to do here
+          break;
+        }
+
+        // ── Approval flow ───────────────────────────────────────────────────
         case EventType.APPROVAL_REQUIRED: {
           updateTask(taskId, {
             status: TaskStatus.AWAITING_APPROVAL,
@@ -167,6 +216,7 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
           });
           break;
 
+        // ── Artifacts ───────────────────────────────────────────────────────
         case EventType.ARTIFACT_CREATED: {
           const artifact = event.payload as import('@/lib/types').Artifact;
           const currentTask = getTasks().tasks[taskId];
@@ -177,14 +227,6 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
           }
           break;
         }
-
-        case EventType.ERROR:
-          addToast({
-            type: 'error',
-            title: 'Agent error',
-            message: (event.payload.message as string) || 'An error occurred.',
-          });
-          break;
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps

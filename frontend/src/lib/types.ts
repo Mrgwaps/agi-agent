@@ -25,6 +25,9 @@ export enum EventType {
   TOOL_CALL_STARTED = 'tool_call_started',
   TOOL_CALL_COMPLETED = 'tool_call_completed',
   TOOL_CALL_FAILED = 'tool_call_failed',
+  // Backend-native event types (mapped from tool_called / tool_result)
+  TOOL_CALLED = 'tool_called',
+  TOOL_RESULT = 'tool_result',
   MODEL_CALL = 'model_call',
   APPROVAL_REQUIRED = 'approval_required',
   APPROVAL_GRANTED = 'approval_granted',
@@ -33,6 +36,10 @@ export enum EventType {
   LOG = 'log',
   ERROR = 'error',
   COST_UPDATE = 'cost_update',
+  // Backend thinking / orchestration events
+  THINKING = 'thinking',
+  RETRY = 'retry',
+  REPLAN = 'replan',
 }
 
 export enum StepStatus {

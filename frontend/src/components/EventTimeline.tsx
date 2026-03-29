@@ -43,7 +43,9 @@ const EVENT_CONFIG: Record<string, {
   [EventType.STEP_COMPLETED]: { icon: CheckCircle2, color: 'text-success', bg: 'bg-success/10', label: 'Step Done', filter: 'all' },
   [EventType.STEP_FAILED]: { icon: XCircle, color: 'text-error', bg: 'bg-error/10', label: 'Step Failed', filter: 'errors' },
   [EventType.TOOL_CALL_STARTED]: { icon: Wrench, color: 'text-warning', bg: 'bg-warning/10', label: 'Tool Call', filter: 'tools' },
+  [EventType.TOOL_CALLED]: { icon: Wrench, color: 'text-warning', bg: 'bg-warning/10', label: 'Tool Call', filter: 'tools' },
   [EventType.TOOL_CALL_COMPLETED]: { icon: Wrench, color: 'text-success', bg: 'bg-success/10', label: 'Tool Done', filter: 'tools' },
+  [EventType.TOOL_RESULT]: { icon: Wrench, color: 'text-success', bg: 'bg-success/10', label: 'Tool Done', filter: 'tools' },
   [EventType.TOOL_CALL_FAILED]: { icon: Wrench, color: 'text-error', bg: 'bg-error/10', label: 'Tool Error', filter: 'errors' },
   [EventType.MODEL_CALL]: { icon: BrainCircuit, color: 'text-accent', bg: 'bg-accent/10', label: 'Model Call', filter: 'models' },
   [EventType.APPROVAL_REQUIRED]: { icon: ShieldAlert, color: 'text-warning', bg: 'bg-warning/10', label: 'Approval Needed', filter: 'approvals' },
@@ -53,33 +55,58 @@ const EVENT_CONFIG: Record<string, {
   [EventType.LOG]: { icon: MessageSquare, color: 'text-text-muted', bg: 'bg-surface', label: 'Log', filter: 'all' },
   [EventType.ERROR]: { icon: AlertTriangle, color: 'text-error', bg: 'bg-error/10', label: 'Error', filter: 'errors' },
   [EventType.COST_UPDATE]: { icon: Sparkles, color: 'text-text-muted', bg: 'bg-surface', label: 'Cost Update', filter: 'all' },
+  [EventType.THINKING]: { icon: BrainCircuit, color: 'text-accent', bg: 'bg-accent/10', label: 'Thinking', filter: 'all' },
+  [EventType.RETRY]: { icon: Loader2, color: 'text-warning', bg: 'bg-warning/10', label: 'Retrying', filter: 'errors' },
+  [EventType.REPLAN]: { icon: BrainCircuit, color: 'text-warning', bg: 'bg-warning/10', label: 'Replanning', filter: 'all' },
 };
 
 function getEventSummary(event: AgentEvent): string {
   const p = event.payload;
   switch (event.type) {
-    case EventType.PLAN_CREATED:
-      return `Created plan with ${(p.plan as unknown[])?.length ?? '?'} steps`;
+    case EventType.THINKING:
+      return (p.message as string) || 'Agent is thinking…';
+    case EventType.PLAN_CREATED: {
+      const steps = (p.plan as unknown[]) ?? (p.steps as unknown[]);
+      return `Created plan with ${steps?.length ?? '?'} steps`;
+    }
     case EventType.STEP_STARTED:
-      return `Step ${(p.stepIndex as number ?? 0) + 1}: ${p.title as string || ''}`;
+      return `▶ ${(p.title as string) || (p.description as string) || 'Executing step…'}`;
     case EventType.STEP_COMPLETED:
-      return `Step ${(p.stepIndex as number ?? 0) + 1} completed`;
+      return `✓ ${(p.title as string) || (p.description as string) || 'Step completed'}`;
     case EventType.STEP_FAILED:
-      return `Step ${(p.stepIndex as number ?? 0) + 1} failed: ${p.error as string || ''}`;
+      return `✗ ${(p.description as string) || 'Step failed'}: ${p.error as string || ''}`;
     case EventType.TOOL_CALL_STARTED:
-      return `${p.toolName as string || 'tool'} called`;
+    case EventType.TOOL_CALLED:
+      return `Calling ${p.toolName as string || p.tool as string || 'tool'}…`;
     case EventType.TOOL_CALL_COMPLETED:
-      return `${p.toolName as string || 'tool'} completed`;
+    case EventType.TOOL_RESULT:
+      return `${p.toolName as string || p.tool as string || 'tool'} → ${(p.result_preview as string)?.slice(0, 80) || 'done'}`;
     case EventType.TOOL_CALL_FAILED:
       return `${p.toolName as string || 'tool'} error: ${p.error as string || ''}`;
     case EventType.MODEL_CALL:
       return `${(p.model as string || 'model').split('/').pop()} — ${p.inputTokens as number || 0}+${p.outputTokens as number || 0} tokens`;
+    case EventType.RETRY: {
+      const attempt = p.attempt as number ?? 1;
+      const max = p.max_retries as number ?? 3;
+      const backoff = p.backoff_seconds as number ?? 2;
+      return `Retry ${attempt}/${max} — waiting ${backoff}s: ${(p.error as string)?.slice(0, 60) || ''}`;
+    }
+    case EventType.REPLAN:
+      return `Replanning after: ${(p.failed_step as string)?.slice(0, 60) || 'failure'}`;
     case EventType.APPROVAL_REQUIRED:
       return p.action as string || 'Action requires approval';
+    case EventType.COST_UPDATE: {
+      const total = p.total_cost as number ?? 0;
+      return total > 0 ? `Total: $${total.toFixed(4)}` : 'Cost tracked';
+    }
+    case EventType.TASK_COMPLETED:
+      return `Done — ${p.steps_completed as number ?? 0} steps completed`;
+    case EventType.TASK_FAILED:
+      return (p.error as string) || 'Task failed';
     case EventType.LOG:
       return p.message as string || '';
     case EventType.ERROR:
-      return p.message as string || p.error as string || 'Error occurred';
+      return (p.error as string) || (p.message as string) || 'Error occurred';
     default:
       return '';
   }

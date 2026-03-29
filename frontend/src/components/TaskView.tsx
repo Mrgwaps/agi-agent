@@ -18,7 +18,7 @@ import {
 import { useStore } from '@/lib/store';
 import { useTaskStream } from '@/hooks/useTaskStream';
 import { abortTask } from '@/lib/api';
-import { TaskStatus } from '@/lib/types';
+import { TaskStatus, EventType } from '@/lib/types';
 import { PlanView } from './PlanView';
 import { EventTimeline } from './EventTimeline';
 import { ToolLog } from './ToolLog';
@@ -84,7 +84,12 @@ export function TaskView({ taskId }: TaskViewProps) {
   const artifacts = task.artifacts || [];
 
   const toolCallEvents = events.filter(
-    (e) => e.type === EventType.TOOL_CALL_STARTED || e.type === EventType.TOOL_CALL_COMPLETED || e.type === EventType.TOOL_CALL_FAILED
+    (e) =>
+      e.type === EventType.TOOL_CALL_STARTED ||
+      e.type === EventType.TOOL_CALLED ||
+      e.type === EventType.TOOL_CALL_COMPLETED ||
+      e.type === EventType.TOOL_RESULT ||
+      e.type === EventType.TOOL_CALL_FAILED
   );
 
   async function handleAbort() {

@@ -27,9 +27,11 @@ export function formatDuration(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-export function formatRelativeTime(iso: string): string {
-  const now = Date.now();
+export function formatRelativeTime(iso: string | undefined | null): string {
+  if (!iso) return '—';
   const then = new Date(iso).getTime();
+  if (isNaN(then)) return '—';
+  const now = Date.now();
   const diff = now - then;
 
   if (diff < 5_000) return 'just now';
