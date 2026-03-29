@@ -49,6 +49,17 @@ Thumbs.db
 artifacts/
 workspace/
 
+# Local dev temp/cache (redirected from C: to keep system drive free)
+.tmp/
+.pip-cache/
+.npm-cache/
+.local-logs/
+.be.pid
+.fe.pid
+*.db
+chroma_data/
+agi_workspace/
+
 # Secrets
 *.pem
 *.key
