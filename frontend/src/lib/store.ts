@@ -267,6 +267,9 @@ export const useStore = create<StoreState>()(
         events: state.events,
         costSummary: state.costSummary,
       }),
+      // Prevent SSR/client mismatch: server and first client render both use
+      // default state. StoreHydration component triggers rehydration after mount.
+      skipHydration: true,
     }
   )
 );
