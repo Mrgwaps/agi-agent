@@ -87,17 +87,20 @@ _PREMIUM_GOAL_KEYWORDS = frozenset({
     "sell", "publish", "professional",
 })
 
+# ---------------------------------------------------------------------------
 # Rate-limit constants
-_429_BASE_WAIT    = 10.0    # base seconds for first 429
-_429_MAX_WAIT     = 120.0   # hard cap per backoff
-_MAX_TOTAL_WAIT   = 300.0   # if we've waited this long total, give up
-_JITTER_RANGE     = 3.0     # ±seconds of random jitter added to every backoff
-# Max concurrent LLM calls across the system — prevents thundering-herd 429s
-_MAX_CONCURRENT   = 3
+# ---------------------------------------------------------------------------
+_429_BASE_WAIT    = 15.0    # base seconds for first 429 within a pass
+_429_MAX_WAIT     = 120.0   # hard cap per model backoff
+_MAX_TOTAL_WAIT   = 360.0   # total seconds we'll wait before giving up
+_JITTER_RANGE     = 5.0     # random jitter added to every backoff
+_MAX_PASSES       = 4       # full rotation passes before giving up
+# Minimum gap between ANY two calls on the same instance (serialises free-tier traffic)
+_GLOBAL_MIN_INTERVAL = 3.0  # seconds — keeps us under ~20 RPM free-tier limit
 
 
 def _jitter(base: float, max_val: float = _429_MAX_WAIT) -> float:
-    """Apply capped exponential value + random jitter."""
+    """Apply capped value + random jitter."""
     return min(base + random.uniform(0, _JITTER_RANGE), max_val)
 
 
@@ -106,9 +109,21 @@ def infer_quality(
     goal: str = "",
     is_final_step: bool = False,
     task_type: str = "general",
+    has_budget: bool = False,
 ) -> ModelQuality:
+    """
+    Infer the required model quality for a step.
+
+    PREMIUM is only returned when has_budget=True (user has set a USD budget)
+    or the task_type explicitly requires paid models.  By default everything
+    routes through free models so the system works without any credits.
+    """
     desc_lower = step_description.lower()
     goal_lower = goal.lower()
+
+    # Without a real budget, force free so we never hit paid-model 429/402
+    if not has_budget:
+        return ModelQuality.FREE
 
     if task_type in ("writing", "synthesis", "delivery"):
         return ModelQuality.PREMIUM
@@ -130,19 +145,20 @@ def infer_quality(
 
 class OpenRouterClient:
     """
-    Async OpenRouter API client with quality-tier routing and robust 429 handling.
+    Async OpenRouter client with robust free-tier 429 handling.
 
-    Key improvements over naïve retry:
-    - Global semaphore caps concurrent in-flight requests (prevents pile-ups)
-    - Per-model backoff dictionary tracks each model's cooldown independently
-    - When ALL models are rate-limited, waits for the soonest-available one
-      instead of raising immediately after N attempts
-    - Exponential backoff + jitter prevents thundering-herd re-429s
-    - Background service clients can be created as separate instances so they
-      don't compete with main task execution
+    Design principles:
+    - Global serial gate (_global_lock) ensures at most one in-flight call at a
+      time per instance, keeping traffic well under free-tier RPM limits.
+    - Per-model backoff dict tracks each model's cooldown independently.
+    - _call_with_rotation loops up to _MAX_PASSES times: each pass tries all
+      currently-available models, then waits for the soonest backoff to expire
+      before starting the next pass.  429s never bubble up to the executor.
+    - background_openrouter_client is a separate instance so researcher/heartbeat
+      never compete with active task execution.
     """
 
-    def __init__(self, max_concurrent: int = _MAX_CONCURRENT) -> None:
+    def __init__(self, max_concurrent: int = 1) -> None:
         self._session_cost: float = 0.0
         self._base_url = settings.openrouter_base_url
         self._api_key = settings.openrouter_api_key
@@ -154,12 +170,11 @@ class OpenRouterClient:
         }
         # Per-model: monotonic timestamp when backoff expires
         self._model_backoff: Dict[str, float] = {}
-        # Global concurrency gate — prevents thundering-herd 429s
+        # Serialise all outgoing calls — one-at-a-time prevents thundering-herd 429s
         self._semaphore = asyncio.Semaphore(max_concurrent)
-        # Per-model last-call time (for minimum spacing)
-        self._model_last_call: Dict[str, float] = {}
-        # Minimum ms between calls to the same model
-        self._min_model_interval = 0.8  # seconds
+        # Enforce minimum gap between consecutive calls
+        self._last_call_time: float = 0.0
+        self._call_lock = asyncio.Lock()
 
     # ── Public helpers ──────────────────────────────────────────────────────
 
@@ -186,13 +201,12 @@ class OpenRouterClient:
         return best_model, best_wait
 
     def _available_free_models(self) -> List[str]:
+        """Return free models not currently in backoff (shuffled), or soonest first."""
         now = time.monotonic()
         available = [m for m in FREE_MODELS if self._model_backoff.get(m, 0) <= now]
         if available:
-            # Shuffle to distribute load
             random.shuffle(available)
             return available
-        # All rate-limited: return sorted by soonest available
         return sorted(FREE_MODELS, key=lambda m: self._model_backoff.get(m, 0))
 
     def _pick_model(self, task_type: str, quality: ModelQuality, max_budget: Optional[float] = None) -> str:
@@ -214,7 +228,7 @@ class OpenRouterClient:
                 return best_free
             return self._available_free_models()[0]
 
-        # PREMIUM
+        # PREMIUM — only reachable if has_budget=True was passed to infer_quality
         if not self._api_key:
             logger.warning("No API key; falling back to free model for premium task")
             return self._available_free_models()[0]
@@ -271,7 +285,8 @@ class OpenRouterClient:
             for m in PREMIUM_MODELS:
                 if m != preferred_model:
                     candidates.append(m)
-            candidates.extend(self._available_free_models())
+            # Always include free models as final fallback
+            candidates.extend([m for m in FREE_MODELS if m not in candidates])
         else:
             # Free/balanced: rotate through all free models
             candidates = [preferred_model] + [m for m in FREE_MODELS if m != preferred_model]
@@ -279,73 +294,86 @@ class OpenRouterClient:
         last_exc: Exception = RuntimeError("No models available")
         total_waited = 0.0
 
-        for attempt_idx, model in enumerate(candidates):
-            # Check / honour per-model backoff
-            now = time.monotonic()
-            backoff_until = self._model_backoff.get(model, 0)
-            if backoff_until > now:
-                wait_secs = _jitter(backoff_until - now)
-                if total_waited + wait_secs > _MAX_TOTAL_WAIT:
-                    # Skip this model — too long to wait, try the next
-                    logger.debug("Skipping %s (backoff too long: %.1fs)", model, wait_secs)
+        for pass_num in range(_MAX_PASSES):
+            tried_this_pass = False
+
+            for model in candidates:
+                # Skip models still in backoff on this pass (we'll wait at end of pass)
+                now = time.monotonic()
+                backoff_until = self._model_backoff.get(model, 0)
+                if backoff_until > now:
                     continue
-                logger.info("Model %s cooling down, waiting %.1fs (attempt %d)", model, wait_secs, attempt_idx + 1)
-                await asyncio.sleep(wait_secs)
-                total_waited += wait_secs
 
-            try:
-                result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
-                if quality == ModelQuality.PREMIUM and model in FREE_MODELS:
-                    logger.warning("Premium task used free model %s (premium unavailable)", model)
-                return result
+                tried_this_pass = True
+                try:
+                    result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
+                    if quality == ModelQuality.PREMIUM and model in FREE_MODELS:
+                        logger.warning("Premium task used free model %s (paid model unavailable)", model)
+                    return result
 
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status == 429:
-                    retry_after_raw = exc.response.headers.get("Retry-After", "")
-                    try:
-                        retry_after = float(retry_after_raw)
-                    except (ValueError, TypeError):
-                        retry_after = min(_429_BASE_WAIT * (2 ** attempt_idx), _429_MAX_WAIT)
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    if status == 429:
+                        retry_after_raw = exc.response.headers.get("Retry-After", "")
+                        try:
+                            server_wait = float(retry_after_raw)
+                        except (ValueError, TypeError):
+                            # Exponential: 15s, 30s, 60s, 120s across passes
+                            server_wait = min(_429_BASE_WAIT * (2 ** pass_num), _429_MAX_WAIT)
 
-                    backoff = _jitter(retry_after)
-                    self._model_backoff[model] = time.monotonic() + backoff
-                    logger.warning("429 on %s → backoff %.1fs, rotating to next model", model, backoff)
+                        backoff = _jitter(server_wait)
+                        self._model_backoff[model] = time.monotonic() + backoff
+                        logger.warning(
+                            "429 on %s (pass %d) → backoff %.1fs, trying next model",
+                            model, pass_num + 1, backoff,
+                        )
+                        last_exc = exc
+                        continue
+
+                    elif status in (401, 402, 403):
+                        logger.warning("HTTP %d on %s → skip (auth/billing)", status, model)
+                        last_exc = exc
+                        continue
+
+                    logger.warning("HTTP %d from %s: %s", status, model, exc.response.text[:200])
                     last_exc = exc
                     continue
 
-                elif status in (401, 402, 403):
-                    logger.warning("HTTP %d on %s → skip (auth/billing)", status, model)
+                except Exception as exc:
+                    logger.warning("Error calling %s: %s", model, exc)
                     last_exc = exc
                     continue
 
-                logger.warning("HTTP %d from %s: %s", status, model, exc.response.text[:200])
-                last_exc = exc
-                if attempt_idx < len(candidates) - 1:
-                    continue
-                raise
+            # ── End of pass: all available models tried (or all in backoff) ──
+            if pass_num >= _MAX_PASSES - 1:
+                break  # No more passes
 
-            except Exception as exc:
-                logger.warning("Error calling %s: %s", model, exc)
-                last_exc = exc
-                if attempt_idx < len(candidates) - 1:
-                    continue
-                raise
+            soonest_model, soonest_wait = self._soonest_available_free()
 
-        # All candidates exhausted — wait for soonest available free model and retry once
-        soonest_model, soonest_wait = self._soonest_available_free()
-        if soonest_wait > 0 and total_waited + soonest_wait <= _MAX_TOTAL_WAIT:
-            wait_with_jitter = _jitter(soonest_wait)
+            if soonest_wait <= 0 and tried_this_pass:
+                # Models were available but all failed for non-429 reason
+                logger.warning("Pass %d: all models failed with non-429 errors", pass_num + 1)
+                break
+
+            # Wait for soonest model to cool down before next pass
+            if soonest_wait <= 0:
+                soonest_wait = _429_BASE_WAIT * (2 ** pass_num)
+
+            wait_with_jitter = _jitter(min(soonest_wait, _429_MAX_WAIT))
+
+            if total_waited + wait_with_jitter > _MAX_TOTAL_WAIT:
+                logger.warning(
+                    "Total wait budget exhausted (%.0fs) after pass %d — giving up",
+                    _MAX_TOTAL_WAIT, pass_num + 1,
+                )
+                break
+
             logger.info(
-                "All models rate-limited. Waiting %.1fs for %s to recover…",
-                wait_with_jitter, soonest_model,
+                "Pass %d/%d exhausted. Waiting %.1fs for %s to recover before pass %d…",
+                pass_num + 1, _MAX_PASSES, wait_with_jitter, soonest_model, pass_num + 2,
             )
             await asyncio.sleep(wait_with_jitter)
-            # Single final attempt
-            try:
-                return await self._single_call(soonest_model, messages, temperature, max_tokens, json_mode)
-            except Exception as exc:
-                last_exc = exc
+            total_waited += wait_with_jitter
 
         raise last_exc
 
@@ -357,14 +385,23 @@ class OpenRouterClient:
         max_tokens: int,
         json_mode: bool,
     ) -> Tuple[str, str, float]:
-        """Make a single HTTP call to OpenRouter, gated by the global semaphore."""
+        """
+        Make a single HTTP call to OpenRouter.
+
+        Gated by:
+        1. _semaphore — caps concurrent in-flight requests
+        2. _call_lock + _GLOBAL_MIN_INTERVAL — enforces minimum spacing between
+           consecutive calls to stay under free-tier RPM limits
+        """
         async with self._semaphore:
-            # Enforce per-model minimum interval
-            now = time.monotonic()
-            last = self._model_last_call.get(model, 0)
-            gap = self._min_model_interval - (now - last)
-            if gap > 0:
-                await asyncio.sleep(gap)
+            # Enforce minimum gap between consecutive calls on this client instance
+            async with self._call_lock:
+                now = time.monotonic()
+                gap = _GLOBAL_MIN_INTERVAL - (now - self._last_call_time)
+                if gap > 0:
+                    logger.debug("Rate-spacing: sleeping %.2fs before next call", gap)
+                    await asyncio.sleep(gap)
+                self._last_call_time = time.monotonic()
 
             payload: Dict[str, Any] = {
                 "model": model,
@@ -382,7 +419,6 @@ class OpenRouterClient:
                     headers=self._headers,
                     json=payload,
                 )
-            self._model_last_call[model] = time.monotonic()
             resp.raise_for_status()
 
         data = resp.json()
@@ -413,8 +449,8 @@ class OpenRouterClient:
 
 # ── Singletons ──────────────────────────────────────────────────────────────
 
-# Main client used by task executor
-openrouter_client = OpenRouterClient(max_concurrent=3)
+# Main client — serialised (max_concurrent=1) keeps free-tier traffic under RPM limit
+openrouter_client = OpenRouterClient(max_concurrent=1)
 
 # Dedicated low-priority client for background services (skill researcher, heartbeat).
 # Separate instance = separate semaphore = never competes with task execution.

@@ -17,10 +17,8 @@ from app.tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 5          # increased from 3
-BASE_BACKOFF = 3.0       # seconds for non-rate-limit errors
-RATE_LIMIT_BACKOFF = 20.0  # base seconds when 429 bubbles to executor
-RATE_LIMIT_MAX_BACKOFF = 90.0  # cap on rate-limit backoff
+MAX_RETRIES = 3          # openrouter client handles 429 internally; this covers tool/network errors
+BASE_BACKOFF = 5.0       # seconds for non-rate-limit errors
 
 
 def _is_rate_limit(exc: Exception) -> bool:
@@ -91,11 +89,11 @@ class ExecutorService:
                 if attempt < MAX_RETRIES:
                     import random
                     if _is_rate_limit(exc):
-                        # Exponential with cap and jitter for rate limits
-                        base = min(RATE_LIMIT_BACKOFF * (2 ** (attempt - 1)), RATE_LIMIT_MAX_BACKOFF)
-                        backoff = base + random.uniform(0, 5)
+                        # 429 bubbled past the client's rotation — wait longer before retry
+                        backoff = 60.0 + random.uniform(0, 15)
+                        logger.warning("429 escaped client rotation; executor waiting %.0fs", backoff)
                     else:
-                        backoff = (BASE_BACKOFF ** attempt) + random.uniform(0, 2)
+                        backoff = (BASE_BACKOFF * attempt) + random.uniform(0, 2)
                     self._emit(self._make_event(
                         EventType.retry,
                         payload={
@@ -180,10 +178,13 @@ class ExecutorService:
         history = self._format_history(state)
 
         is_final = (state.currentStep == len(state.plan) - 1)
+        # Always use free models — prevents 402/429 from paid models with no credits.
+        # Set has_budget=True only when OpenRouter credits are confirmed.
         quality = infer_quality(
             step_description=step.description,
             goal=state.goal,
             is_final_step=is_final,
+            has_budget=False,
         )
 
         desc_lower = step.description.lower()
