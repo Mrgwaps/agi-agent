@@ -52,7 +52,7 @@ function Header({
         <span className="text-sm font-bold text-text tracking-tight hidden sm:block">
           AGI Agent
         </span>
-        <span className="text-xs text-text-muted hidden sm:block">Neural Interface</span>
+        <span className="text-xs text-text-muted hidden sm:block">Production</span>
       </div>
 
       <div className="flex-1 flex items-center justify-center">

@@ -27,7 +27,7 @@ function normalizeTask(raw: any): TaskState {
     id: raw.id ?? raw.taskId ?? raw.task_id,
     goal: raw.goal ?? '',
     status: raw.status,
-    mode: raw.mode ?? 'demo',
+    mode: raw.mode ?? 'auto',
     constraints: raw.constraints ?? {},
     plan: (raw.plan ?? []).map(normalizeStep),
     currentStepIndex: raw.currentStepIndex ?? raw.currentStep ?? 0,
@@ -154,7 +154,7 @@ async function apiFetch<T>(
 export async function createTask(
   goal: string,
   constraints: TaskCreate['constraints'],
-  mode: 'demo' | 'interactive' = 'demo'
+  mode: 'auto' | 'interactive' = 'auto'
 ): Promise<TaskState> {
   const raw = await apiFetch<unknown>('/tasks', {
     method: 'POST',

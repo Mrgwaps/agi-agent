@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     # ── App ──────────────────────────────────────────────────────────────────
-    app_name: str = "AGI Demo Agent"
+    app_name: str = "AGI Agent"
     debug: bool = False
     log_level: str = "INFO"
 
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # ── OpenRouter ────────────────────────────────────────────────────────────
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_app_name: str = "AGI Demo Agent"
+    openrouter_app_name: str = "AGI Agent"
     openrouter_site_url: str = "http://localhost:3000"
     openrouter_default_model: str = "meta-llama/llama-3.3-70b-instruct:free"
     openrouter_planning_model: str = "google/gemma-3-27b-it:free"

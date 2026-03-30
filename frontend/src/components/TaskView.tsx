@@ -31,9 +31,9 @@ import { cn, formatCost, formatRelativeTime } from '@/lib/utils';
 // ============================================================
 
 const STATUS_CONFIG = {
-  [TaskStatus.PENDING]: { icon: Clock, color: 'text-text-muted', bg: 'bg-surface', label: 'Pending' },
+  [TaskStatus.PENDING]: { icon: Clock, color: 'text-text-muted', bg: 'bg-surface', label: 'Queued' },
   [TaskStatus.PLANNING]: { icon: BrainCircuit, color: 'text-accent', bg: 'bg-accent/10', label: 'Planning…' },
-  [TaskStatus.RUNNING]: { icon: Loader2, color: 'text-primary', bg: 'bg-primary/10', label: 'Running' },
+  [TaskStatus.RUNNING]: { icon: Loader2, color: 'text-primary', bg: 'bg-primary/10', label: 'Live' },
   [TaskStatus.AWAITING_APPROVAL]: { icon: AlertCircle, color: 'text-warning', bg: 'bg-warning/10', label: 'Awaiting Approval' },
   [TaskStatus.COMPLETED]: { icon: CheckCircle2, color: 'text-success', bg: 'bg-success/10', label: 'Completed' },
   [TaskStatus.FAILED]: { icon: XCircle, color: 'text-error', bg: 'bg-error/10', label: 'Failed' },
@@ -165,8 +165,8 @@ export function TaskView({ taskId }: TaskViewProps) {
               {plan.filter((s) => s.status === 'completed').length}/{plan.length} steps
             </span>
           )}
-          <span className={cn('font-mono text-xs', task.mode === 'demo' ? 'text-accent' : 'text-primary')}>
-            {task.mode}
+          <span className={cn('font-mono text-xs', task.mode === 'interactive' ? 'text-primary' : 'text-accent')}>
+            {task.mode === 'interactive' ? 'interactive' : 'auto'}
           </span>
         </div>
 

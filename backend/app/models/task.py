@@ -19,8 +19,10 @@ class TaskStatus(str, Enum):
 
 
 class TaskMode(str, Enum):
-    demo = "demo"
+    auto = "auto"
     interactive = "interactive"
+    # legacy alias — accept 'demo' from older clients without breaking
+    demo = "demo"
 
 
 class StepStatus(str, Enum):
@@ -48,7 +50,7 @@ class TaskConstraints(BaseModel):
 
 class TaskCreate(BaseModel):
     goal: str = Field(..., min_length=1, max_length=4096)
-    mode: TaskMode = TaskMode.demo
+    mode: TaskMode = TaskMode.auto
     constraints: TaskConstraints = Field(default_factory=TaskConstraints)
 
 
@@ -71,7 +73,7 @@ class TaskStep(BaseModel):
 class TaskState(BaseModel):
     taskId: str = Field(default_factory=lambda: str(uuid.uuid4()))
     goal: str
-    mode: TaskMode = TaskMode.demo
+    mode: TaskMode = TaskMode.auto
     status: TaskStatus = TaskStatus.queued
     constraints: TaskConstraints = Field(default_factory=TaskConstraints)
     plan: List[TaskStep] = Field(default_factory=list)

@@ -180,7 +180,7 @@ async def _build_task_context() -> Optional[Dict[str, Any]]:
         # Return a generic context when memory is unavailable
         return {
             "count": 1,
-            "list_text": "- [unknown] No task data available (agent running in demo mode)",
+            "list_text": "- [unknown] No task data available (agent initializing)",
         }
 
 

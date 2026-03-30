@@ -84,7 +84,7 @@ export function TaskInput({ onTaskCreated }: TaskInputProps) {
   const addToast = useStore((s) => s.addToast);
 
   const [goal, setGoal] = useState('');
-  const [mode, setMode] = useState<'demo' | 'interactive'>('demo');
+  const [mode, setMode] = useState<'auto' | 'interactive'>('auto');
   const [loading, setLoading] = useState(false);
   const [focused, setFocused] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -274,7 +274,7 @@ export function TaskInput({ onTaskCreated }: TaskInputProps) {
 
         {/* Mode selector */}
         <div className="flex gap-2">
-          {(['demo', 'interactive'] as const).map((m) => (
+          {(['auto', 'interactive'] as const).map((m) => (
             <button
               key={m}
               type="button"
@@ -286,7 +286,7 @@ export function TaskInput({ onTaskCreated }: TaskInputProps) {
                   : 'bg-surface border-border text-text-muted hover:text-text hover:border-border'
               )}
             >
-              {m === 'demo' ? '🎬 Demo Mode' : '🤝 Interactive'}
+              {m === 'auto' ? '⚡ Auto' : '🤝 Interactive'}
             </button>
           ))}
         </div>

@@ -10,8 +10,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: 'AGI Agent - Neural Interface',
-  description: 'Professional AI operations console for autonomous agent orchestration',
+  title: 'AGI Agent',
+  description: 'Autonomous AI agent platform — production-grade task execution and revenue generation',
   icons: {
     icon: '/favicon.ico',
   },

@@ -84,7 +84,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="1.0.0",
-        description="AGI Demo Agent — FastAPI backend with LangGraph orchestration",
+        description="AGI Agent — FastAPI backend with LangGraph orchestration",
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",

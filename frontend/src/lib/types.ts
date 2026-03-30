@@ -75,7 +75,7 @@ export interface TaskConstraints {
 export interface TaskCreate {
   goal: string;
   constraints: TaskConstraints;
-  mode?: 'demo' | 'interactive';
+  mode?: 'auto' | 'interactive';
 }
 
 export interface TaskStep {
@@ -109,7 +109,7 @@ export interface TaskState {
   goal: string;
   status: TaskStatus;
   constraints: TaskConstraints;
-  mode: 'demo' | 'interactive';
+  mode: 'auto' | 'interactive';
   plan?: TaskStep[];
   currentStepIndex?: number;
   artifacts: Artifact[];

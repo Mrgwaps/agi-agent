@@ -1,1 +1,1 @@
-# AGI Demo Agent – FastAPI backend
+# AGI Agent – FastAPI backend

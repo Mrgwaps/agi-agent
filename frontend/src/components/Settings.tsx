@@ -216,9 +216,17 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
 
   const [local, setLocal] = useState<SettingsType>(storeSettings);
   const [saved, setSaved] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
   const [ollamaStatus, setOllamaStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+
+  // Avoid hydration mismatch — only read window after mount
+  useEffect(() => { setMounted(true); }, []);
+
+  const webhookBase = mounted
+    ? window.location.origin.replace(':3000', ':8000')
+    : 'http://localhost:8000';
 
   // Sync when store changes
   useEffect(() => {
@@ -560,7 +568,7 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
                   <p className="text-xs text-text-muted">
                     <span className="font-semibold text-text">Webhook URL:</span>{' '}
                     <code className="font-mono text-primary">
-                      {typeof window !== 'undefined' ? window.location.origin.replace(':3000', ':8000') : 'http://localhost:8000'}/webhooks/stripe
+                      {webhookBase}/webhooks/stripe
                     </code>
                   </p>
                   <p className="text-xs text-text-muted mt-1">
