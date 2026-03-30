@@ -23,22 +23,30 @@ class ModelQuality(str, Enum):
     PREMIUM  = "premium"    # Writing, synthesis, final delivery, complex code
 
 
-# Free models — zero cost, rotated on 429
+# ---------------------------------------------------------------------------
+# Primary model: Gemini Flash 2.0 (free tier, highest quota on OpenRouter)
+# Fallbacks rotate through other free models if Gemini is 429'd
+# ---------------------------------------------------------------------------
+
+GEMINI_FLASH = "google/gemini-2.0-flash-exp:free"
+
+# Free models — ordered by quota/reliability; Gemini Flash first
 FREE_MODELS: List[str] = [
-    "google/gemma-3-27b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-r1:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",       # primary — highest free-tier quota
+    "google/gemma-3-27b-it:free",             # fallback 1
+    "meta-llama/llama-3.3-70b-instruct:free", # fallback 2
+    "qwen/qwen-2.5-72b-instruct:free",        # fallback 3
+    "mistralai/mistral-7b-instruct:free",     # fallback 4
+    "deepseek/deepseek-r1:free",              # fallback 5 (slow, good for reasoning)
 ]
 
-# Premium models — best output quality for deliverables
+# Premium models — paid, only used when has_budget=True
 PREMIUM_MODELS: List[str] = [
-    "anthropic/claude-3.5-sonnet",
-    "openai/gpt-4o",
+    "google/gemini-flash-1.5",          # cheapest paid, fast
     "openai/gpt-4o-mini",
     "anthropic/claude-3-haiku",
-    "google/gemini-flash-1.5",
+    "openai/gpt-4o",
+    "anthropic/claude-3.5-sonnet",
 ]
 
 # Cost per 1 million tokens (input, output) in USD
@@ -57,16 +65,17 @@ MODEL_COSTS: Dict[str, Tuple[float, float]] = {
 }
 
 # Task type → (free model, premium model)
+# All task types default to Gemini Flash as the free model
 TASK_MODEL_MAP: Dict[str, Tuple[str, str]] = {
-    "planning":   ("google/gemma-3-27b-it:free",              "anthropic/claude-3.5-sonnet"),
-    "web":        ("meta-llama/llama-3.3-70b-instruct:free",  "openai/gpt-4o-mini"),
-    "code":       ("deepseek/deepseek-r1:free",               "anthropic/claude-3.5-sonnet"),
-    "analysis":   ("qwen/qwen-2.5-72b-instruct:free",         "openai/gpt-4o-mini"),
-    "writing":    ("meta-llama/llama-3.3-70b-instruct:free",  "anthropic/claude-3.5-sonnet"),
-    "synthesis":  ("qwen/qwen-2.5-72b-instruct:free",         "anthropic/claude-3.5-sonnet"),
-    "delivery":   ("meta-llama/llama-3.3-70b-instruct:free",  "anthropic/claude-3.5-sonnet"),
-    "general":    ("meta-llama/llama-3.3-70b-instruct:free",  "openai/gpt-4o-mini"),
-    "structured": ("mistralai/mistral-7b-instruct:free",      "openai/gpt-4o-mini"),
+    "planning":   (GEMINI_FLASH, "anthropic/claude-3.5-sonnet"),
+    "web":        (GEMINI_FLASH, "openai/gpt-4o-mini"),
+    "code":       (GEMINI_FLASH, "anthropic/claude-3.5-sonnet"),
+    "analysis":   (GEMINI_FLASH, "openai/gpt-4o-mini"),
+    "writing":    (GEMINI_FLASH, "anthropic/claude-3.5-sonnet"),
+    "synthesis":  (GEMINI_FLASH, "anthropic/claude-3.5-sonnet"),
+    "delivery":   (GEMINI_FLASH, "anthropic/claude-3.5-sonnet"),
+    "general":    (GEMINI_FLASH, "openai/gpt-4o-mini"),
+    "structured": (GEMINI_FLASH, "openai/gpt-4o-mini"),
 }
 
 # Keywords that signal premium-quality output is needed
@@ -222,10 +231,9 @@ class OpenRouterClient:
             return self._available_free_models()[0]
 
         if quality == ModelQuality.BALANCED:
-            best_free = "meta-llama/llama-3.3-70b-instruct:free"
             now = time.monotonic()
-            if self._model_backoff.get(best_free, 0) <= now:
-                return best_free
+            if self._model_backoff.get(GEMINI_FLASH, 0) <= now:
+                return GEMINI_FLASH
             return self._available_free_models()[0]
 
         # PREMIUM — only reachable if has_budget=True was passed to infer_quality
