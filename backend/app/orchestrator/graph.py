@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 APPROVAL_POLL_INTERVAL = 1.0  # seconds
 APPROVAL_TIMEOUT = 300  # 5 minutes
+MAX_REPLANS = 2  # prevent infinite replan loops
 
 
 class OrchestratorGraph:
@@ -47,11 +48,21 @@ class OrchestratorGraph:
         Persists state after every node.
         """
         try:
+            # Fast-fail with a clear message if the API key is missing
+            from app.config import settings as _cfg
+            if not _cfg.openrouter_api_key:
+                raise RuntimeError(
+                    "OPENROUTER_API_KEY is not set. "
+                    "Add it to backend/.env and restart the server."
+                )
+
             state = await self._intake_node(state)
             await self._save(state)
 
             state = await self._plan_node(state)
             await self._save(state)
+
+            replan_count = 0
 
             while state.status == TaskStatus.running and not self._stopped:
                 if state.currentStep >= len(state.plan):
@@ -73,13 +84,18 @@ class OrchestratorGraph:
 
                 current_step = state.plan[state.currentStep]
                 if current_step.status == StepStatus.failed:
-                    if step.retry_count >= 3:
-                        # Too many retries: attempt replan
+                    if replan_count < MAX_REPLANS:
+                        replan_count += 1
                         state = await self._replan_node(state)
                         await self._save(state)
                         if not state.plan[state.currentStep:]:
                             break
                     else:
+                        # Exceeded replan budget — skip to next step rather than looping
+                        logger.warning(
+                            "Step '%s' failed after %d replans — skipping",
+                            current_step.description[:60], MAX_REPLANS,
+                        )
                         state.currentStep += 1
                 elif current_step.status == StepStatus.completed:
                     state = await self._verify_node(state)
@@ -368,8 +384,8 @@ class OrchestratorGraph:
             synthesis, model, cost = await openrouter_client.chat_completion(
                 messages=synthesis_messages,
                 task_type="synthesis",
-                quality=ModelQuality.PREMIUM,
-                max_tokens=8192,
+                quality=ModelQuality.FREE,
+                max_tokens=4096,
                 temperature=0.6,
             )
             state.result = synthesis
