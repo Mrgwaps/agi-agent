@@ -2,13 +2,14 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BrainCircuit, Settings, DollarSign, Activity, TrendingUp } from 'lucide-react';
+import { BrainCircuit, Settings, DollarSign, Activity, TrendingUp, Zap } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { TaskSidebar } from '@/components/TaskSidebar';
 import { TaskInput } from '@/components/TaskInput';
 import { TaskView } from '@/components/TaskView';
 import { CostTracker } from '@/components/CostTracker';
 import { EarningsCard } from '@/components/EarningsCard';
+import { SkillsPanel } from '@/components/SkillsPanel';
 import { SettingsPanel } from '@/components/Settings';
 import { ModelIndicator } from '@/components/ModelIndicator';
 import { VoicePlayer } from '@/components/VoicePlayer';
@@ -20,7 +21,7 @@ import { cn } from '@/lib/utils';
 // Right sidebar panel
 // ============================================================
 
-type RightPanel = 'cost' | 'earnings' | null;
+type RightPanel = 'cost' | 'earnings' | 'skills' | null;
 
 // ============================================================
 // Header
@@ -90,6 +91,19 @@ function Header({
         >
           <TrendingUp className="w-3.5 h-3.5" />
           <span className="hidden sm:block">Earnings</span>
+        </button>
+
+        <button
+          onClick={() => setRightPanel(rightPanel === 'skills' ? null : 'skills')}
+          className={cn(
+            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors',
+            rightPanel === 'skills'
+              ? 'bg-primary/15 text-accent border border-primary/30'
+              : 'text-text-muted hover:text-text hover:bg-surface-elevated'
+          )}
+        >
+          <Zap className="w-3.5 h-3.5" />
+          <span className="hidden sm:block">Skills</span>
         </button>
 
         <button
@@ -248,6 +262,19 @@ export default function HomePage() {
             >
               <div className="w-60 h-full overflow-y-auto">
                 <EarningsCard pollInterval={30_000} />
+              </div>
+            </motion.aside>
+          )}
+          {rightPanel === 'skills' && (
+            <motion.aside
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: 280, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 350, damping: 32 }}
+              className="flex-shrink-0 overflow-hidden border-l border-border bg-card"
+            >
+              <div className="w-70 h-full" style={{ width: 280 }}>
+                <SkillsPanel pollInterval={60_000} />
               </div>
             </motion.aside>
           )}

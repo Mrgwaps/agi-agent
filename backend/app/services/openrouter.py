@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,7 +23,7 @@ class ModelQuality(str, Enum):
     PREMIUM  = "premium"    # Writing, synthesis, final delivery, complex code
 
 
-# Free models — zero cost, good for intermediate tasks
+# Free models — zero cost, rotated on 429
 FREE_MODELS: List[str] = [
     "google/gemma-3-27b-it:free",
     "meta-llama/llama-3.3-70b-instruct:free",
@@ -33,11 +34,11 @@ FREE_MODELS: List[str] = [
 
 # Premium models — best output quality for deliverables
 PREMIUM_MODELS: List[str] = [
-    "anthropic/claude-3.5-sonnet",      # Best prose & reasoning
-    "openai/gpt-4o",                    # Great all-round
-    "openai/gpt-4o-mini",               # Cost-efficient premium
-    "anthropic/claude-3-haiku",         # Fast, cheap, still premium quality
-    "google/gemini-flash-1.5",          # Fast, capable
+    "anthropic/claude-3.5-sonnet",
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "anthropic/claude-3-haiku",
+    "google/gemini-flash-1.5",
 ]
 
 # Cost per 1 million tokens (input, output) in USD
@@ -68,7 +69,7 @@ TASK_MODEL_MAP: Dict[str, Tuple[str, str]] = {
     "structured": ("mistralai/mistral-7b-instruct:free",      "openai/gpt-4o-mini"),
 }
 
-# Keywords that indicate a step requires premium-quality output
+# Keywords that signal premium-quality output is needed
 _PREMIUM_KEYWORDS = frozenset({
     "write", "writing", "written", "author", "compose", "composing",
     "draft", "drafting", "create content", "generate content",
@@ -86,10 +87,18 @@ _PREMIUM_GOAL_KEYWORDS = frozenset({
     "sell", "publish", "professional",
 })
 
-# 429 backoff constants
-_429_BASE_WAIT = 8.0
-_429_MAX_WAIT = 90.0
-_MIN_CALL_INTERVAL_MS = 500
+# Rate-limit constants
+_429_BASE_WAIT    = 10.0    # base seconds for first 429
+_429_MAX_WAIT     = 120.0   # hard cap per backoff
+_MAX_TOTAL_WAIT   = 300.0   # if we've waited this long total, give up
+_JITTER_RANGE     = 3.0     # ±seconds of random jitter added to every backoff
+# Max concurrent LLM calls across the system — prevents thundering-herd 429s
+_MAX_CONCURRENT   = 3
+
+
+def _jitter(base: float, max_val: float = _429_MAX_WAIT) -> float:
+    """Apply capped exponential value + random jitter."""
+    return min(base + random.uniform(0, _JITTER_RANGE), max_val)
 
 
 def infer_quality(
@@ -98,40 +107,42 @@ def infer_quality(
     is_final_step: bool = False,
     task_type: str = "general",
 ) -> ModelQuality:
-    """
-    Decide the quality tier for a given step based on its description, the
-    overall goal, whether it is the last step, and the task type.
-    """
     desc_lower = step_description.lower()
     goal_lower = goal.lower()
 
-    # Delivery / synthesis task types always warrant premium
     if task_type in ("writing", "synthesis", "delivery"):
         return ModelQuality.PREMIUM
 
-    # Final step that produces the deliverable
     if is_final_step and any(k in desc_lower for k in (
         "deliver", "final", "synthesize", "compile", "write", "create",
         "produce", "generate", "compose", "draft", "complete",
     )):
         return ModelQuality.PREMIUM
 
-    # Step description contains premium-quality signals
     if any(k in desc_lower for k in _PREMIUM_KEYWORDS):
         return ModelQuality.PREMIUM
 
-    # Goal is inherently a high-quality content deliverable
     if any(k in goal_lower for k in _PREMIUM_GOAL_KEYWORDS):
-        # All steps of a writing task should be at least BALANCED
         return ModelQuality.BALANCED
 
     return ModelQuality.FREE
 
 
 class OpenRouterClient:
-    """Async OpenRouter API client with quality-tier model routing."""
+    """
+    Async OpenRouter API client with quality-tier routing and robust 429 handling.
 
-    def __init__(self) -> None:
+    Key improvements over naïve retry:
+    - Global semaphore caps concurrent in-flight requests (prevents pile-ups)
+    - Per-model backoff dictionary tracks each model's cooldown independently
+    - When ALL models are rate-limited, waits for the soonest-available one
+      instead of raising immediately after N attempts
+    - Exponential backoff + jitter prevents thundering-herd re-429s
+    - Background service clients can be created as separate instances so they
+      don't compete with main task execution
+    """
+
+    def __init__(self, max_concurrent: int = _MAX_CONCURRENT) -> None:
         self._session_cost: float = 0.0
         self._base_url = settings.openrouter_base_url
         self._api_key = settings.openrouter_api_key
@@ -141,9 +152,14 @@ class OpenRouterClient:
             "X-Title": settings.openrouter_app_name,
             "Content-Type": "application/json",
         }
+        # Per-model: monotonic timestamp when backoff expires
         self._model_backoff: Dict[str, float] = {}
-        self._request_lock = asyncio.Lock()
-        self._last_call_time: float = 0.0
+        # Global concurrency gate — prevents thundering-herd 429s
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        # Per-model last-call time (for minimum spacing)
+        self._model_last_call: Dict[str, float] = {}
+        # Minimum ms between calls to the same model
+        self._min_model_interval = 0.8  # seconds
 
     # ── Public helpers ──────────────────────────────────────────────────────
 
@@ -158,45 +174,49 @@ class OpenRouterClient:
     def session_cost(self) -> float:
         return self._session_cost
 
+    def _soonest_available_free(self) -> Tuple[str, float]:
+        """Return (model, wait_seconds) for the free model available soonest."""
+        now = time.monotonic()
+        best_model = FREE_MODELS[0]
+        best_wait = max(0.0, self._model_backoff.get(FREE_MODELS[0], 0) - now)
+        for m in FREE_MODELS[1:]:
+            w = max(0.0, self._model_backoff.get(m, 0) - now)
+            if w < best_wait:
+                best_wait, best_model = w, m
+        return best_model, best_wait
+
     def _available_free_models(self) -> List[str]:
         now = time.monotonic()
         available = [m for m in FREE_MODELS if self._model_backoff.get(m, 0) <= now]
         if available:
+            # Shuffle to distribute load
+            random.shuffle(available)
             return available
+        # All rate-limited: return sorted by soonest available
         return sorted(FREE_MODELS, key=lambda m: self._model_backoff.get(m, 0))
 
-    def _pick_model(
-        self,
-        task_type: str,
-        quality: ModelQuality,
-        max_budget: Optional[float] = None,
-    ) -> str:
-        """Select the best model given quality tier and remaining budget."""
+    def _pick_model(self, task_type: str, quality: ModelQuality, max_budget: Optional[float] = None) -> str:
         remaining = (max_budget or settings.openrouter_max_budget_usd) - self._session_cost
         budget_tight = remaining <= 0.05
 
-        free_model, premium_model = TASK_MODEL_MAP.get(
-            task_type, TASK_MODEL_MAP["general"]
-        )
+        free_model, premium_model = TASK_MODEL_MAP.get(task_type, TASK_MODEL_MAP["general"])
 
         if quality == ModelQuality.FREE or budget_tight:
-            # Use the best available free model for this task type
             now = time.monotonic()
             if self._model_backoff.get(free_model, 0) <= now:
                 return free_model
             return self._available_free_models()[0]
 
         if quality == ModelQuality.BALANCED:
-            # Use the highest-quality free model (llama-3.3-70b is our best free)
             best_free = "meta-llama/llama-3.3-70b-instruct:free"
             now = time.monotonic()
             if self._model_backoff.get(best_free, 0) <= now:
                 return best_free
             return self._available_free_models()[0]
 
-        # PREMIUM — try premium model, fall back to best free if unavailable
+        # PREMIUM
         if not self._api_key:
-            logger.warning("No API key set; falling back to free model for premium task")
+            logger.warning("No API key; falling back to free model for premium task")
             return self._available_free_models()[0]
         return premium_model
 
@@ -207,26 +227,17 @@ class OpenRouterClient:
         messages: List[Dict[str, Any]],
         task_type: str = "general",
         quality: ModelQuality = ModelQuality.FREE,
-        # Legacy compat — force_free=True overrides quality to FREE
         force_free: bool = False,
         max_budget: Optional[float] = None,
         temperature: float = 0.7,
         max_tokens: int = 2048,
         json_mode: bool = False,
     ) -> Tuple[str, str, float]:
-        """
-        Call OpenRouter. Quality tier determines model selection:
-          FREE     → task-specific free model
-          BALANCED → best free model (llama-3.3-70b)
-          PREMIUM  → best premium model (claude-3.5-sonnet / gpt-4o-mini)
-        """
         if force_free:
             quality = ModelQuality.FREE
 
         model = self._pick_model(task_type, quality, max_budget)
-        logger.info(
-            "Model selected: %s (quality=%s, task=%s)", model, quality.value, task_type
-        )
+        logger.info("Model selected: %s (quality=%s, task=%s)", model, quality.value, task_type)
 
         return await self._call_with_rotation(
             messages=messages,
@@ -251,44 +262,41 @@ class OpenRouterClient:
         json_mode: bool,
     ) -> Tuple[str, str, float]:
         if not self._api_key:
-            raise ValueError(
-                "OPENROUTER_API_KEY is not set. "
-                "Please set the environment variable."
-            )
+            raise ValueError("OPENROUTER_API_KEY is not set.")
 
         # Build ordered candidate list
         if quality == ModelQuality.PREMIUM:
-            # Premium tasks: try premium first, then all premium fallbacks, then free
             _, premium_model = TASK_MODEL_MAP.get(task_type, TASK_MODEL_MAP["general"])
             candidates = [preferred_model]
             for m in PREMIUM_MODELS:
                 if m != preferred_model:
                     candidates.append(m)
-            # Always include free models as last resort
-            candidates.extend(FREE_MODELS)
+            candidates.extend(self._available_free_models())
         else:
-            # Free/balanced: rotate through free models only
+            # Free/balanced: rotate through all free models
             candidates = [preferred_model] + [m for m in FREE_MODELS if m != preferred_model]
 
         last_exc: Exception = RuntimeError("No models available")
+        total_waited = 0.0
 
         for attempt_idx, model in enumerate(candidates):
+            # Check / honour per-model backoff
             now = time.monotonic()
             backoff_until = self._model_backoff.get(model, 0)
             if backoff_until > now:
-                wait_secs = backoff_until - now
-                logger.info("Model %s rate-limited, waiting %.1fs", model, wait_secs)
+                wait_secs = _jitter(backoff_until - now)
+                if total_waited + wait_secs > _MAX_TOTAL_WAIT:
+                    # Skip this model — too long to wait, try the next
+                    logger.debug("Skipping %s (backoff too long: %.1fs)", model, wait_secs)
+                    continue
+                logger.info("Model %s cooling down, waiting %.1fs (attempt %d)", model, wait_secs, attempt_idx + 1)
                 await asyncio.sleep(wait_secs)
+                total_waited += wait_secs
 
             try:
-                result = await self._single_call(
-                    model, messages, temperature, max_tokens, json_mode
-                )
-                is_free = model in FREE_MODELS
-                if quality == ModelQuality.PREMIUM and is_free:
-                    logger.warning(
-                        "Premium task fell back to free model %s (premium unavailable)", model
-                    )
+                result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
+                if quality == ModelQuality.PREMIUM and model in FREE_MODELS:
+                    logger.warning("Premium task used free model %s (premium unavailable)", model)
                 return result
 
             except httpx.HTTPStatusError as exc:
@@ -299,19 +307,18 @@ class OpenRouterClient:
                         retry_after = float(retry_after_raw)
                     except (ValueError, TypeError):
                         retry_after = min(_429_BASE_WAIT * (2 ** attempt_idx), _429_MAX_WAIT)
-                    self._model_backoff[model] = time.monotonic() + retry_after
-                    logger.warning(
-                        "429 on %s — backoff %.1fs, trying next model", model, retry_after
-                    )
+
+                    backoff = _jitter(retry_after)
+                    self._model_backoff[model] = time.monotonic() + backoff
+                    logger.warning("429 on %s → backoff %.1fs, rotating to next model", model, backoff)
                     last_exc = exc
                     continue
+
                 elif status in (401, 402, 403):
-                    # Auth / billing error on premium model — fall back to free immediately
-                    logger.warning(
-                        "HTTP %d on premium model %s — falling back to free", status, model
-                    )
+                    logger.warning("HTTP %d on %s → skip (auth/billing)", status, model)
                     last_exc = exc
                     continue
+
                 logger.warning("HTTP %d from %s: %s", status, model, exc.response.text[:200])
                 last_exc = exc
                 if attempt_idx < len(candidates) - 1:
@@ -319,11 +326,26 @@ class OpenRouterClient:
                 raise
 
             except Exception as exc:
-                logger.warning("Error calling model %s: %s", model, exc)
+                logger.warning("Error calling %s: %s", model, exc)
                 last_exc = exc
                 if attempt_idx < len(candidates) - 1:
                     continue
                 raise
+
+        # All candidates exhausted — wait for soonest available free model and retry once
+        soonest_model, soonest_wait = self._soonest_available_free()
+        if soonest_wait > 0 and total_waited + soonest_wait <= _MAX_TOTAL_WAIT:
+            wait_with_jitter = _jitter(soonest_wait)
+            logger.info(
+                "All models rate-limited. Waiting %.1fs for %s to recover…",
+                wait_with_jitter, soonest_model,
+            )
+            await asyncio.sleep(wait_with_jitter)
+            # Single final attempt
+            try:
+                return await self._single_call(soonest_model, messages, temperature, max_tokens, json_mode)
+            except Exception as exc:
+                last_exc = exc
 
         raise last_exc
 
@@ -335,12 +357,14 @@ class OpenRouterClient:
         max_tokens: int,
         json_mode: bool,
     ) -> Tuple[str, str, float]:
-        async with self._request_lock:
+        """Make a single HTTP call to OpenRouter, gated by the global semaphore."""
+        async with self._semaphore:
+            # Enforce per-model minimum interval
             now = time.monotonic()
-            gap = _MIN_CALL_INTERVAL_MS / 1000.0
-            elapsed = now - self._last_call_time
-            if elapsed < gap:
-                await asyncio.sleep(gap - elapsed)
+            last = self._model_last_call.get(model, 0)
+            gap = self._min_model_interval - (now - last)
+            if gap > 0:
+                await asyncio.sleep(gap)
 
             payload: Dict[str, Any] = {
                 "model": model,
@@ -358,7 +382,7 @@ class OpenRouterClient:
                     headers=self._headers,
                     json=payload,
                 )
-            self._last_call_time = time.monotonic()
+            self._model_last_call[model] = time.monotonic()
             resp.raise_for_status()
 
         data = resp.json()
@@ -374,6 +398,7 @@ class OpenRouterClient:
         cost = self.estimate_cost(actual_model, input_tokens, output_tokens)
         self._session_cost += cost
 
+        # Clear backoff on success
         self._model_backoff.pop(actual_model, None)
 
         logger.info(
@@ -386,5 +411,11 @@ class OpenRouterClient:
         self._session_cost = 0.0
 
 
-# Singleton
-openrouter_client = OpenRouterClient()
+# ── Singletons ──────────────────────────────────────────────────────────────
+
+# Main client used by task executor
+openrouter_client = OpenRouterClient(max_concurrent=3)
+
+# Dedicated low-priority client for background services (skill researcher, heartbeat).
+# Separate instance = separate semaphore = never competes with task execution.
+background_openrouter_client = OpenRouterClient(max_concurrent=1)

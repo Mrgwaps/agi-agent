@@ -29,6 +29,8 @@ _latest_insight: Dict[str, Any] = {
     "tasks_analyzed": 0,
     "model_used": None,
     "next_run_in_seconds": 1800,
+    "new_skills": [],
+    "total_skills": 0,
 }
 _last_run_time: Optional[float] = None
 _INTERVAL = 1800  # 30 minutes
@@ -111,12 +113,25 @@ async def _run_heartbeat() -> None:
     elapsed = time.monotonic() - t0
     now = datetime.now(timezone.utc)
 
+    # Enrich with skills data
+    new_skills: list = []
+    total_skills = 0
+    try:
+        from app.services.skills_db import skills_db as _skills_db
+        new_skills = await _skills_db.get_recent_skills(limit=5)
+        stats = await _skills_db.get_stats()
+        total_skills = stats.get("active_skills", 0)
+    except Exception:
+        pass
+
     _latest_insight = {
         "text": text,
         "timestamp": now.isoformat(),
         "tasks_analyzed": task_context["count"],
         "model_used": model_used,
         "next_run_in_seconds": _INTERVAL,
+        "new_skills": new_skills,
+        "total_skills": total_skills,
     }
     _last_run_time = now.timestamp()
 
@@ -170,8 +185,8 @@ async def _build_task_context() -> Optional[Dict[str, Any]]:
 
 
 async def _call_free_llm(task_context: Dict[str, Any]) -> tuple[str, str]:
-    """Try free LLM models (OpenRouter → HuggingFace → static)."""
-    from app.services.openrouter import ModelQuality, openrouter_client
+    """Try free LLM models (OpenRouter background client → HuggingFace → static)."""
+    from app.services.openrouter import ModelQuality, background_openrouter_client as openrouter_client
 
     user_prompt = _USER_PROMPT_TEMPLATE.format(
         task_list=task_context["list_text"]
@@ -181,9 +196,10 @@ async def _call_free_llm(task_context: Dict[str, Any]) -> tuple[str, str]:
         {"role": "user", "content": user_prompt},
     ]
 
-    # OpenRouter FREE tier — the client rotates automatically on 429
+    # Use the background client (separate semaphore — never competes with tasks)
+    from app.services.openrouter import background_openrouter_client
     try:
-        text, model_used, _ = await openrouter_client.chat_completion(
+        text, model_used, _ = await background_openrouter_client.chat_completion(
             messages=messages,
             task_type="analysis",
             quality=ModelQuality.FREE,

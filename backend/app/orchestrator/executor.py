@@ -17,9 +17,10 @@ from app.tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
-BASE_BACKOFF = 3.0   # seconds for non-rate-limit errors
-RATE_LIMIT_BACKOFF = 15.0  # seconds when 429 reaches the executor level
+MAX_RETRIES = 5          # increased from 3
+BASE_BACKOFF = 3.0       # seconds for non-rate-limit errors
+RATE_LIMIT_BACKOFF = 20.0  # base seconds when 429 bubbles to executor
+RATE_LIMIT_MAX_BACKOFF = 90.0  # cap on rate-limit backoff
 
 
 def _is_rate_limit(exc: Exception) -> bool:
@@ -88,11 +89,13 @@ class ExecutorService:
                 step.retry_count = attempt
 
                 if attempt < MAX_RETRIES:
-                    # Use a longer backoff for rate-limit errors
+                    import random
                     if _is_rate_limit(exc):
-                        backoff = RATE_LIMIT_BACKOFF * attempt
+                        # Exponential with cap and jitter for rate limits
+                        base = min(RATE_LIMIT_BACKOFF * (2 ** (attempt - 1)), RATE_LIMIT_MAX_BACKOFF)
+                        backoff = base + random.uniform(0, 5)
                     else:
-                        backoff = BASE_BACKOFF ** attempt
+                        backoff = (BASE_BACKOFF ** attempt) + random.uniform(0, 2)
                     self._emit(self._make_event(
                         EventType.retry,
                         payload={

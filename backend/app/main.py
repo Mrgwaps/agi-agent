@@ -55,10 +55,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("ChromaDB unavailable: %s", exc)
 
-    # Start 30-minute heartbeat intelligence loop
+    # Start 30-minute heartbeat intelligence loop (uses background_openrouter_client)
     from app.api.heartbeat import heartbeat_loop
     _heartbeat_task = asyncio.create_task(heartbeat_loop())
     logger.info("Heartbeat intelligence loop started (30-min interval)")
+
+    # Start perpetual skill researcher (2-hour cycles, uses background_openrouter_client)
+    from app.services.skill_researcher import skill_researcher_loop
+    _skill_task = asyncio.create_task(skill_researcher_loop())
+    logger.info("Skill researcher started (2-hour cycles, deepseek-r1:free)")
 
     logger.info("%s ready.", settings.app_name)
     yield
@@ -134,6 +139,7 @@ def create_app() -> FastAPI:
     from app.api.email_api import router as email_router
     from app.api.payments import router as payments_router
     from app.api.webhooks import router as webhooks_router
+    from app.api.skills import router as skills_router
 
     app.include_router(tasks_router)
     app.include_router(tools_router)
@@ -144,6 +150,7 @@ def create_app() -> FastAPI:
     app.include_router(email_router)
     app.include_router(payments_router)
     app.include_router(webhooks_router)
+    app.include_router(skills_router)
 
     # ── Health check ─────────────────────────────────────────────────────────
     @app.get("/health", tags=["system"])
