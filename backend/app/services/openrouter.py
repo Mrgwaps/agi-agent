@@ -99,18 +99,20 @@ _PREMIUM_GOAL_KEYWORDS = frozenset({
 # ---------------------------------------------------------------------------
 # Rate-limit constants
 # ---------------------------------------------------------------------------
-_429_BASE_WAIT    = 15.0    # base seconds for first 429 within a pass
-_429_MAX_WAIT     = 120.0   # hard cap per model backoff
-_MAX_TOTAL_WAIT   = 360.0   # total seconds we'll wait before giving up
-_JITTER_RANGE     = 5.0     # random jitter added to every backoff
-_MAX_PASSES       = 4       # full rotation passes before giving up
-# Minimum gap between ANY two calls on the same instance (serialises free-tier traffic)
-_GLOBAL_MIN_INTERVAL = 3.0  # seconds — keeps us under ~20 RPM free-tier limit
+# Strategy: when 429 hits, DON'T try other models immediately (they share the
+# same account-level quota on OpenRouter free tier — rapid rotation burns
+# quota faster).  Instead: wait, retry same model, then try ONE backup.
+_RETRY_WAITS      = [65.0, 70.0]   # wait before each successive retry on same model
+_FALLBACK_WAIT    = 75.0            # wait before trying the single backup model
+_MAX_TOTAL_WAIT   = 300.0           # absolute cap across all waits
+_JITTER_RANGE     = 8.0             # random jitter added to every wait
+# Minimum gap between consecutive calls — keeps traffic under free RPM limit
+_GLOBAL_MIN_INTERVAL = 4.0          # seconds
 
 
-def _jitter(base: float, max_val: float = _429_MAX_WAIT) -> float:
+def _jitter(base: float, cap: float = 180.0) -> float:
     """Apply capped value + random jitter."""
-    return min(base + random.uniform(0, _JITTER_RANGE), max_val)
+    return min(base + random.uniform(0, _JITTER_RANGE), cap)
 
 
 def infer_quality(
@@ -286,102 +288,115 @@ class OpenRouterClient:
         if not self._api_key:
             raise ValueError("OPENROUTER_API_KEY is not set.")
 
-        # Build ordered candidate list
+        # ── Strategy ──────────────────────────────────────────────────────────
+        # OpenRouter free tier uses a SHARED account-level rate limit, not
+        # per-model.  Rapid rotation through 6 models burns quota faster and
+        # makes recovery slower.
+        #
+        # Instead:
+        #   1. Try preferred model (Gemini Flash).
+        #   2. On 429 → wait _RETRY_WAITS[0] seconds, retry SAME model.
+        #   3. Still 429 → wait _RETRY_WAITS[1] seconds, retry SAME model.
+        #   4. Still 429 → wait _FALLBACK_WAIT, try ONE backup free model.
+        #   5. Still 429 → raise (executor handles graceful degradation).
+        #
+        # For PREMIUM quality, paid models are tried first; if all 4xx, fall
+        # through to the free strategy above.
+
         if quality == ModelQuality.PREMIUM:
-            _, premium_model = TASK_MODEL_MAP.get(task_type, TASK_MODEL_MAP["general"])
-            candidates = [preferred_model]
-            for m in PREMIUM_MODELS:
-                if m != preferred_model:
-                    candidates.append(m)
-            # Always include free models as final fallback
-            candidates.extend([m for m in FREE_MODELS if m not in candidates])
+            paid_candidates = [preferred_model] + [m for m in PREMIUM_MODELS if m != preferred_model]
         else:
-            # Free/balanced: rotate through all free models
-            candidates = [preferred_model] + [m for m in FREE_MODELS if m != preferred_model]
+            paid_candidates = []
+
+        # Backup: any free model that isn't the preferred one
+        backup_free = next(
+            (m for m in FREE_MODELS if m != preferred_model and self._model_backoff.get(m, 0) <= time.monotonic()),
+            FREE_MODELS[1] if len(FREE_MODELS) > 1 else preferred_model,
+        )
 
         last_exc: Exception = RuntimeError("No models available")
         total_waited = 0.0
 
-        for pass_num in range(_MAX_PASSES):
-            tried_this_pass = False
-
-            for model in candidates:
-                # Skip models still in backoff on this pass (we'll wait at end of pass)
-                now = time.monotonic()
-                backoff_until = self._model_backoff.get(model, 0)
-                if backoff_until > now:
-                    continue
-
-                tried_this_pass = True
-                try:
-                    result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
-                    if quality == ModelQuality.PREMIUM and model in FREE_MODELS:
-                        logger.warning("Premium task used free model %s (paid model unavailable)", model)
-                    return result
-
-                except httpx.HTTPStatusError as exc:
-                    status = exc.response.status_code
-                    if status == 429:
-                        retry_after_raw = exc.response.headers.get("Retry-After", "")
-                        try:
-                            server_wait = float(retry_after_raw)
-                        except (ValueError, TypeError):
-                            # Exponential: 15s, 30s, 60s, 120s across passes
-                            server_wait = min(_429_BASE_WAIT * (2 ** pass_num), _429_MAX_WAIT)
-
-                        backoff = _jitter(server_wait)
-                        self._model_backoff[model] = time.monotonic() + backoff
-                        logger.warning(
-                            "429 on %s (pass %d) → backoff %.1fs, trying next model",
-                            model, pass_num + 1, backoff,
-                        )
-                        last_exc = exc
-                        continue
-
-                    elif status in (401, 402, 403):
-                        logger.warning("HTTP %d on %s → skip (auth/billing)", status, model)
-                        last_exc = exc
-                        continue
-
-                    logger.warning("HTTP %d from %s: %s", status, model, exc.response.text[:200])
+        # ── Try paid models first (PREMIUM only) ──────────────────────────────
+        for model in paid_candidates:
+            now = time.monotonic()
+            if self._model_backoff.get(model, 0) > now:
+                continue
+            try:
+                return await self._single_call(model, messages, temperature, max_tokens, json_mode)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in (401, 402, 403):
+                    logger.warning("HTTP %d on paid model %s → skip", status, model)
                     last_exc = exc
                     continue
+                if status == 429:
+                    last_exc = exc
+                    # Fall through to free strategy below
+                    break
+                logger.warning("HTTP %d from %s: %s", status, model, exc.response.text[:200])
+                last_exc = exc
+                continue
+            except Exception as exc:
+                logger.warning("Error on paid model %s: %s", model, exc)
+                last_exc = exc
+                continue
 
-                except Exception as exc:
-                    logger.warning("Error calling %s: %s", model, exc)
+        # ── Free-model strategy: preferred → wait → retry → wait → backup ────
+        schedule = [
+            (preferred_model, 0.0),            # attempt 1: immediate
+            (preferred_model, _RETRY_WAITS[0]), # attempt 2: wait 65s
+            (preferred_model, _RETRY_WAITS[1]), # attempt 3: wait 70s
+            (backup_free,     _FALLBACK_WAIT),  # attempt 4: backup after 75s
+        ]
+
+        for model, pre_wait in schedule:
+            if pre_wait > 0:
+                if total_waited + pre_wait > _MAX_TOTAL_WAIT:
+                    logger.warning("Rate-limit wait budget exhausted (%.0fs total)", total_waited)
+                    break
+                wait = _jitter(pre_wait)
+                logger.info("Rate-limited — waiting %.0fs before next attempt (model=%s)…", wait, model)
+                await asyncio.sleep(wait)
+                total_waited += wait
+
+            # Honour any per-model backoff set from a prior attempt
+            now = time.monotonic()
+            remaining = self._model_backoff.get(model, 0) - now
+            if remaining > 0:
+                if total_waited + remaining > _MAX_TOTAL_WAIT:
+                    break
+                await asyncio.sleep(remaining)
+                total_waited += remaining
+
+            try:
+                result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
+                if quality == ModelQuality.PREMIUM and model in FREE_MODELS:
+                    logger.warning("Premium task fell back to free model %s", model)
+                return result
+
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status == 429:
+                    retry_after_raw = exc.response.headers.get("Retry-After", "")
+                    try:
+                        hint = float(retry_after_raw)
+                    except (ValueError, TypeError):
+                        hint = 60.0
+                    self._model_backoff[model] = time.monotonic() + hint
+                    logger.warning("429 on %s (Retry-After=%.0fs)", model, hint)
                     last_exc = exc
                     continue
+                elif status in (401, 402, 403):
+                    logger.warning("HTTP %d on %s → skip", status, model)
+                    last_exc = exc
+                    continue
+                logger.warning("HTTP %d from %s: %s", status, model, exc.response.text[:200])
+                last_exc = exc
 
-            # ── End of pass: all available models tried (or all in backoff) ──
-            if pass_num >= _MAX_PASSES - 1:
-                break  # No more passes
-
-            soonest_model, soonest_wait = self._soonest_available_free()
-
-            if soonest_wait <= 0 and tried_this_pass:
-                # Models were available but all failed for non-429 reason
-                logger.warning("Pass %d: all models failed with non-429 errors", pass_num + 1)
-                break
-
-            # Wait for soonest model to cool down before next pass
-            if soonest_wait <= 0:
-                soonest_wait = _429_BASE_WAIT * (2 ** pass_num)
-
-            wait_with_jitter = _jitter(min(soonest_wait, _429_MAX_WAIT))
-
-            if total_waited + wait_with_jitter > _MAX_TOTAL_WAIT:
-                logger.warning(
-                    "Total wait budget exhausted (%.0fs) after pass %d — giving up",
-                    _MAX_TOTAL_WAIT, pass_num + 1,
-                )
-                break
-
-            logger.info(
-                "Pass %d/%d exhausted. Waiting %.1fs for %s to recover before pass %d…",
-                pass_num + 1, _MAX_PASSES, wait_with_jitter, soonest_model, pass_num + 2,
-            )
-            await asyncio.sleep(wait_with_jitter)
-            total_waited += wait_with_jitter
+            except Exception as exc:
+                logger.warning("Error calling %s: %s", model, exc)
+                last_exc = exc
 
         raise last_exc
 

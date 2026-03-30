@@ -107,6 +107,32 @@ class ExecutorService:
                     ))
                     await asyncio.sleep(backoff)
                 else:
+                    # ── Graceful synthesis fallback ───────────────────────────
+                    # If this is a final/synthesis step that failed due to rate
+                    # limits, build a summary from completed steps rather than
+                    # marking the whole workflow as failed.
+                    is_synthesis = any(
+                        kw in step.description.lower()
+                        for kw in ("synthesize", "deliver", "final", "summary", "compile", "complete")
+                    )
+                    if _is_rate_limit(exc) and is_synthesis:
+                        fallback = self._build_synthesis_fallback(state)
+                        step.result = fallback
+                        step.status = StepStatus.completed
+                        step.completed_at = datetime.utcnow()
+                        step.error = "Rate-limited; generated from completed steps"
+                        self._emit(self._make_event(
+                            EventType.step_completed,
+                            payload={
+                                "step_id": step.id,
+                                "description": step.description,
+                                "result_preview": self._preview(fallback),
+                                "attempt": attempt,
+                                "note": "Synthesized from completed steps (LLM rate-limited)",
+                            },
+                        ))
+                        return step
+
                     step.status = StepStatus.failed
                     step.error = str(exc)
                     step.completed_at = datetime.utcnow()
@@ -345,6 +371,31 @@ class ExecutorService:
             return s[:max_len]
         except Exception:
             return str(value)[:max_len]
+
+    def _build_synthesis_fallback(self, state: TaskState) -> str:
+        """
+        Build a structured summary from completed steps when the LLM synthesis
+        step is rate-limited.  Ensures workflows always produce output.
+        """
+        completed = [s for s in state.plan if s.status == StepStatus.completed and s.result]
+        if not completed:
+            return f"Task completed: {state.goal}\n\n(Results unavailable — LLM rate limit hit during synthesis)"
+
+        lines = [
+            f"# Results: {state.goal}",
+            "",
+            "The following work was completed successfully:",
+            "",
+        ]
+        for i, s in enumerate(completed, 1):
+            lines.append(f"## Step {i}: {s.description}")
+            result_str = s.result if isinstance(s.result, str) else str(s.result)
+            lines.append(result_str[:2000])
+            lines.append("")
+
+        lines.append("---")
+        lines.append("*Note: Final synthesis was rate-limited; output assembled from completed steps.*")
+        return "\n".join(lines)
 
     def _sanitize_input(self, tool_input: Dict[str, Any]) -> Dict[str, Any]:
         """Return a copy with long values truncated for event payloads."""
