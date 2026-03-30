@@ -38,6 +38,82 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path("/tmp/agi_skills.db")
 _lock = asyncio.Lock()
 
+# Directory where SKILL.md files are written (superpowers-compatible format)
+# __file__ = backend/app/services/skills_db.py → parents[3] = project root
+_SKILLS_DIR = Path(__file__).resolve().parents[3] / "skills"
+_SKILLS_DIR.mkdir(exist_ok=True)
+
+
+def _write_skill_md(skill: Dict[str, Any]) -> None:
+    """
+    Write (or overwrite) a SKILL.md file for a skill in the superpowers format.
+
+    Directory: skills/{name}/SKILL.md
+    Format:
+        ---
+        name: <slug>
+        description: Use when <description> - activates <title>
+        ---
+        # <title>
+        ...full markdown content...
+    """
+    name = skill.get("name", "")
+    if not name:
+        return
+    skill_dir = _SKILLS_DIR / name
+    skill_dir.mkdir(exist_ok=True)
+    skill_file = skill_dir / "SKILL.md"
+
+    title = skill.get("title", name.replace("_", " ").title())
+    description = skill.get("description", "")
+    system_prompt = skill.get("system_prompt", "")
+    category = skill.get("category", "general")
+    revenue = skill.get("revenue_potential", "none")
+    complexity = skill.get("complexity", "intermediate")
+    tags = skill.get("tags", "")
+    tool_hints = skill.get("tool_hints", "")
+    source_url = skill.get("source_url", "")
+
+    # Superpowers frontmatter: description triggers skill activation
+    frontmatter_desc = f"Use when performing {category} tasks or needing {title.lower()} - {description[:120]}"
+
+    content = f"""---
+name: {name}
+description: {frontmatter_desc}
+---
+
+# {title}
+
+> **Category:** {category} | **Revenue Potential:** {revenue.replace('_', ' ').title()} | **Complexity:** {complexity.title()}
+
+## What This Skill Does
+
+{description}
+
+## System Prompt (Activates This Skill)
+
+```
+{system_prompt}
+```
+
+## When to Use
+
+- Task involves {category} work
+- Revenue potential is {revenue.replace('_', ' ')}
+- Tags: {tags}
+{"- Recommended tools: " + tool_hints if tool_hints else ""}
+
+## Usage
+
+Apply this skill by using the system prompt above as your agent's system context.
+The prompt is designed to prime the LLM for elite-level execution of {title.lower()} tasks.
+{"" if not source_url else chr(10) + "## Source" + chr(10) + chr(10) + source_url}
+"""
+    try:
+        skill_file.write_text(content.strip(), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to write SKILL.md for '%s': %s", name, exc)
+
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
@@ -149,6 +225,7 @@ class SkillsDB:
                         now,
                         skill["name"],
                     ))
+                    _write_skill_md(skill)
                     return {"action": "updated", "skill_id": existing["id"]}
                 else:
                     cur = conn.execute("""
@@ -173,6 +250,7 @@ class SkillsDB:
                         now,
                         now,
                     ))
+                    _write_skill_md(skill)
                     return {"action": "created", "skill_id": cur.lastrowid}
 
     async def record_run(self, skill_id: int, success: bool, task_id: str = "", notes: str = "") -> None:
@@ -204,10 +282,18 @@ class SkillsDB:
     async def deactivate_skill(self, skill_id: int, reason: str = "") -> None:
         async with _lock:
             with _get_conn() as conn:
+                row = conn.execute("SELECT name FROM skills WHERE id = ?", (skill_id,)).fetchone()
                 conn.execute(
                     "UPDATE skills SET is_active = 0, updated_at = ? WHERE id = ?",
                     (time.time(), skill_id),
                 )
+                # Remove SKILL.md so it disappears from the superpowers directory
+                if row:
+                    skill_file = _SKILLS_DIR / row["name"] / "SKILL.md"
+                    try:
+                        skill_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
         logger.info("Skill %d deactivated: %s", skill_id, reason)
 
     async def purge_stale_skills(self, min_success_rate: float = 0.3, min_runs: int = 3) -> int:

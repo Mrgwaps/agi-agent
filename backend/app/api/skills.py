@@ -15,7 +15,10 @@ from __future__ import annotations
 
 from typing import Optional
 
+from pathlib import Path
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from app.services.skills_db import skills_db
@@ -97,6 +100,23 @@ async def trigger_research(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_run)
     return {"success": True, "message": "Research cycle triggered in background"}
+
+
+@router.get("/{name}/skill.md", response_class=PlainTextResponse)
+async def get_skill_md(name: str):
+    """Download the raw SKILL.md file in superpowers format."""
+    _SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills" / name
+    skill_file = _SKILLS_DIR / "SKILL.md"
+    if not skill_file.exists():
+        # Fall back to generating from DB
+        skill = await skills_db.get_skill(name)
+        if not skill:
+            raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+        from app.services.skills_db import _write_skill_md
+        _write_skill_md(skill)
+    if not skill_file.exists():
+        raise HTTPException(status_code=404, detail="SKILL.md not generated yet")
+    return skill_file.read_text(encoding="utf-8")
 
 
 @router.get("/{name}")
