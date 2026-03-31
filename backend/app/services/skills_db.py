@@ -29,13 +29,15 @@ import asyncio
 import json
 import logging
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path("/tmp/agi_skills.db")
+# Use system temp dir — works on Windows, Linux, macOS
+_DB_PATH = Path(tempfile.gettempdir()) / "agi_skills.db"
 _lock = asyncio.Lock()
 
 # Directory where SKILL.md files are written (superpowers-compatible format)

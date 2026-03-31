@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -99,10 +100,10 @@ class Settings(BaseSettings):
     chroma_host: str = "localhost"
     chroma_port: int = 8001
     chroma_collection_name: str = "agi_agent_memory"
-    chroma_persist_directory: str = "/tmp/chroma_data"
+    chroma_persist_directory: str = str(Path(tempfile.gettempdir()) / "chroma_data")
 
     # ── Workspace ────────────────────────────────────────────────────────────
-    workspace_root: str = "/tmp/agi_workspace"
+    workspace_root: str = str(Path(tempfile.gettempdir()) / "agi_workspace")
 
     # ── Telemetry ────────────────────────────────────────────────────────────
     otel_enabled: bool = False
