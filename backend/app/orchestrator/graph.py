@@ -155,6 +155,12 @@ class OrchestratorGraph:
             constraints=state.constraints,
         )
 
+        # Guard: ensure we always have at least one step
+        if not steps:
+            from app.models.task import TaskStep
+            steps = [TaskStep(description=state.goal, tool_used="llm_only")]
+            logger.warning("plan_node: received empty plan, injecting single llm_only step")
+
         state.plan = steps
         state.currentStep = 0
         state.status = TaskStatus.running
