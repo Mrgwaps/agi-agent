@@ -327,8 +327,20 @@ class ExecutorService:
         except Exception as exc:
             logger.warning("Failed to build tool input via LLM: %s", exc)
 
-        # Fallback: pass description as query/path/code
-        return {"query": step.description, "path": ".", "code": step.description}
+        # Fallback: map to the tool's most likely required field
+        tool_name = (step.tool_used or "").lower()
+        if "research" in tool_name:
+            return {"research_question": step.description}
+        if "content_writer" in tool_name:
+            return {"topic": step.description, "instructions": step.description}
+        if "search" in tool_name:
+            return {"query": step.description}
+        if "code" in tool_name or "executor" in tool_name:
+            return {"code": step.description, "language": "python"}
+        if "file" in tool_name or "filesystem" in tool_name:
+            return {"path": ".", "operation": "list"}
+        # Generic fallback covering both query and research_question
+        return {"query": step.description, "research_question": step.description}
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 

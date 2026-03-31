@@ -293,3 +293,40 @@ export async function testBackendHealth(): Promise<boolean> {
     return false;
   }
 }
+
+export async function pushSettingsToBackend(keys: {
+  openrouterApiKey?: string;
+  hyperbrowserApiKey?: string;
+  wavespeedApiKey?: string;
+  googleMapsApiKey?: string;
+  huggingfaceApiKey?: string;
+  serpApiKey?: string;
+  falApiKey?: string;
+  heygenApiKey?: string;
+  agentMailApiKey?: string;
+  ghostApiKey?: string;
+  stripePublishableKey?: string;
+  stripeWebhookSecret?: string;
+}): Promise<void> {
+  try {
+    await apiFetch('/settings', {
+      method: 'POST',
+      body: JSON.stringify({
+        openrouter_api_key: keys.openrouterApiKey || undefined,
+        hyperbrowser_api_key: keys.hyperbrowserApiKey || undefined,
+        wavespeed_api_key: keys.wavespeedApiKey || undefined,
+        google_maps_api_key: keys.googleMapsApiKey || undefined,
+        huggingface_api_key: keys.huggingfaceApiKey || undefined,
+        serp_api_key: keys.serpApiKey || undefined,
+        fal_api_key: keys.falApiKey || undefined,
+        heygen_api_key: keys.heygenApiKey || undefined,
+        agentmail_api_key: keys.agentMailApiKey || undefined,
+        ghost_database_url: keys.ghostApiKey || undefined,
+        stripe_publishable_key: keys.stripePublishableKey || undefined,
+        stripe_webhook_secret: keys.stripeWebhookSecret || undefined,
+      }),
+    });
+  } catch {
+    // Non-fatal — settings still saved locally
+  }
+}

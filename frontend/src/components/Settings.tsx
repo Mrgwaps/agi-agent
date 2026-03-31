@@ -25,7 +25,7 @@ import {
   Database,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
-import { testOllamaConnection } from '@/lib/api';
+import { testOllamaConnection, pushSettingsToBackend } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { Settings as SettingsType } from '@/lib/types';
 
@@ -242,6 +242,21 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
     addToast({ type: 'success', title: 'Settings saved', message: 'Changes applied successfully.' });
+    // Push API keys to backend so they take effect immediately (no restart needed)
+    pushSettingsToBackend({
+      openrouterApiKey: local.openrouterApiKey,
+      hyperbrowserApiKey: local.hyperbrowserApiKey,
+      wavespeedApiKey: local.wavespeedApiKey,
+      googleMapsApiKey: local.googleMapsApiKey,
+      huggingfaceApiKey: local.huggingfaceApiKey,
+      serpApiKey: local.serpApiKey,
+      falApiKey: local.falApiKey,
+      heygenApiKey: local.heygenApiKey,
+      agentMailApiKey: local.agentMailApiKey,
+      ghostApiKey: local.ghostApiKey,
+      stripePublishableKey: local.stripePublishableKey,
+      stripeWebhookSecret: local.stripeWebhookSecret,
+    });
   }
 
   async function handleTestOllama() {

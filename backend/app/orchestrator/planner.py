@@ -32,6 +32,12 @@ class PlannerService:
         persona = get_persona(goal)
         logger.info("Planner: using persona '%s' for goal: %s", persona.domain.value, goal[:80])
 
+        # Fast path: detect simple tasks that don't need LLM planning overhead
+        simple_plan = self._simple_task_plan(goal, constraints)
+        if simple_plan:
+            logger.info("Planner: simple task detected, using %d-step direct plan", len(simple_plan))
+            return simple_plan
+
         user_message = self._build_prompt(goal, constraints, context, persona)
         messages = [
             {"role": "system", "content": persona.planner_system + "\n\n" + _PLAN_FORMAT_INSTRUCTIONS},
@@ -212,6 +218,68 @@ class PlannerService:
             allowed.append(step)
         return allowed
 
+    def _simple_task_plan(self, goal: str, constraints: TaskConstraints) -> Optional[List[TaskStep]]:
+        """
+        Detect simple, focused tasks and return a minimal plan directly —
+        skipping the LLM planner to avoid over-engineering and wasted API calls.
+        """
+        g = goal.lower().strip()
+        words = goal.split()
+        word_count = len(words)
+
+        # ── Simple coding / scripting tasks ──────────────────────────────────
+        coding_triggers = (
+            "write a python", "write python", "create a python", "build a python",
+            "make a python", "python script", "python program", "python function",
+            "write a script", "create a script", "build a script",
+            "write a function", "write a class", "implement a",
+            "code a ", "program that", "write me a", "create me a",
+            "write a simple", "write a basic",
+        )
+        if word_count <= 30 and any(t in g for t in coding_triggers):
+            return [
+                TaskStep(
+                    description=f"Design the approach and write the complete working code for: {goal}",
+                    tool_used="llm_only",
+                ),
+            ]
+
+        # ── Short research + build: "research X and build/create Y" ──────────
+        research_build = (
+            "research and build", "research and create", "research and write",
+            "research and implement", "look up and build", "find out and create",
+        )
+        if word_count <= 25 and any(t in g for t in research_build):
+            return [
+                TaskStep(description=f"Research relevant information for: {goal}", tool_used="web_search"),
+                TaskStep(description=f"Use the research to complete: {goal}", tool_used="llm_only"),
+            ]
+
+        # ── Straightforward factual / explanatory questions ───────────────────
+        question_openers = (
+            "what is ", "what are ", "what does ", "how does ", "how do ",
+            "explain ", "define ", "describe ", "who is ", "why is ",
+            "when did ", "where is ", "how many ", "how much ",
+        )
+        if word_count <= 20 and any(g.startswith(q) for q in question_openers):
+            needs_web = not any(kw in g for kw in ("calculate", "compute", "math", "formula"))
+            tool = "web_search" if needs_web else "llm_only"
+            return [
+                TaskStep(description=f"Answer the question: {goal}", tool_used=tool),
+            ]
+
+        # ── Summarise / translate / convert ──────────────────────────────────
+        direct_llm = (
+            "summarize ", "summarise ", "translate ", "convert ", "list the ",
+            "list all ", "give me a list", "explain like", "tldr",
+        )
+        if word_count <= 20 and any(g.startswith(t) or t in g for t in direct_llm):
+            return [
+                TaskStep(description=goal, tool_used="llm_only"),
+            ]
+
+        return None
+
     def _fallback_plan(self, goal: str, persona: SkillPersona) -> List[TaskStep]:
         """Domain-aware fallback plan when LLM planner fails."""
         if persona.domain == SkillDomain.WRITING:
@@ -245,30 +313,38 @@ Return ONLY a valid JSON array. Each element must have exactly these fields:
 - expected_output: string (what success looks like — specific and measurable)
 - requires_approval: boolean
 
-Tool selection guide:
-- content_writer: writing ebook chapters, articles, guides, reports — any substantial writing
-- web_researcher: deep research tasks needing multiple sources and synthesis
-- enhanced_search: quick fact lookups, current events, finding specific pages (uses SerpAPI + DDG)
-- web_search: basic web search (use enhanced_search for better results)
-- image_generator: create images or short videos from text prompts (WaveSpeed AI / Flux models)
-- location: geocoding, places search, directions, distance matrix (Google Maps)
-- hf_inference: run open-source AI models — text generation, classification, summarization
-- code_executor: running or testing code
-- filesystem: reading/writing files
-- llm_only: reasoning, analysis, synthesis that doesn't need external tools
+EFFICIENCY RULES (critical):
+- Use the MINIMUM number of steps needed. Prefer 1-3 steps for most tasks.
+- Combine research + writing into a single step when possible using llm_only.
+- Never add a step just to "review" or "verify" — do it right the first time.
+- For coding tasks: 1 step (llm_only) is enough for most scripts and functions.
+- For research tasks: 1 web_search/web_researcher step + 1 llm_only synthesis step maximum.
+- Do NOT add separate "plan the architecture", "design the structure", or "outline" steps for small tasks.
 
-Example:
+Tool selection guide:
+- content_writer: writing ebook chapters, articles, guides, reports — substantial structured writing
+- web_researcher: deep research needing multiple sources and synthesis (complex topics only)
+- enhanced_search: quick fact lookups, current events, finding specific pages
+- web_search: basic web search
+- image_generator: create images or videos from text prompts
+- location: geocoding, places search, directions (Google Maps)
+- hf_inference: open-source AI models for classification, embeddings
+- code_executor: running/testing code (use llm_only to write code instead)
+- filesystem: reading/writing files
+- llm_only: reasoning, coding, writing, analysis, synthesis — default choice for most steps
+
+Example for "research Python asyncio and write a guide":
 [
   {
-    "description": "Research the OpenClaw tool: what it does, installation methods, key configuration options",
-    "tool_to_use": "web_researcher",
-    "expected_output": "Comprehensive research brief covering install steps, config options, and best practices",
+    "description": "Research Python asyncio: key concepts, common patterns, and best practices",
+    "tool_to_use": "web_search",
+    "expected_output": "Key facts about asyncio event loop, coroutines, tasks, and error handling",
     "requires_approval": false
   },
   {
-    "description": "Write Chapter 1: Introduction to OpenClaw — what it is, why it matters, who should use it",
+    "description": "Write a complete beginner's guide to Python asyncio covering all researched concepts",
     "tool_to_use": "content_writer",
-    "expected_output": "Complete 1200+ word chapter with engaging intro, clear explanation, and reader benefits",
+    "expected_output": "Structured guide with intro, core concepts, examples, and best practices",
     "requires_approval": false
   }
 ]"""

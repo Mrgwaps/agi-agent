@@ -140,6 +140,7 @@ def create_app() -> FastAPI:
     from app.api.payments import router as payments_router
     from app.api.webhooks import router as webhooks_router
     from app.api.skills import router as skills_router
+    from app.api.settings import router as settings_router
 
     app.include_router(tasks_router)
     app.include_router(tools_router)
@@ -151,6 +152,7 @@ def create_app() -> FastAPI:
     app.include_router(payments_router)
     app.include_router(webhooks_router)
     app.include_router(skills_router)
+    app.include_router(settings_router)
 
     # ── Health check ─────────────────────────────────────────────────────────
     @app.get("/health", tags=["system"])

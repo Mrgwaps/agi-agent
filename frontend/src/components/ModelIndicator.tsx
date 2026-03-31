@@ -16,22 +16,21 @@ export function ModelIndicator({ taskId }: ModelIndicatorProps) {
   const lastModelCall = useMemo(() => {
     if (!events) return null;
     for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].type === EventType.MODEL_CALL) return events[i];
+      const e = events[i];
+      // cost_update events carry model_used; also accept legacy model_call events
+      if (
+        (e.type === EventType.COST_UPDATE || e.type === EventType.MODEL_CALL) &&
+        e.model
+      ) {
+        return e;
+      }
     }
     return null;
   }, [events]);
 
-  const payload = lastModelCall?.payload as {
-    model?: string;
-    costUsd?: number;
-    isFree?: boolean;
-    inputTokens?: number;
-    outputTokens?: number;
-  } | undefined;
-
-  const model = payload?.model || lastModelCall?.model || null;
-  const isFree = payload?.isFree ?? false;
-  const cost = payload?.costUsd ?? lastModelCall?.costUsd ?? 0;
+  const model = lastModelCall?.model ?? (lastModelCall?.payload?.model as string | undefined) ?? null;
+  const cost = lastModelCall?.costUsd ?? 0;
+  const isFree = model?.includes(':free') ?? cost === 0;
 
   if (!model) {
     return (
