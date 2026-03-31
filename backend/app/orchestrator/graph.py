@@ -208,7 +208,12 @@ class OrchestratorGraph:
         if step.status != StepStatus.completed:
             return state
 
-        # Only verify if result is non-trivial
+        # Skip verification for llm_only steps — LLM already produced the answer.
+        # Verifying with another LLM call wastes quota and adds delay.
+        if step.tool_used in (None, "llm_only", ""):
+            return state
+
+        # Only verify tool-produced results (web search, code execution, etc.)
         if not step.result:
             return state
 
@@ -232,7 +237,6 @@ class OrchestratorGraph:
                     ),
                 },
             ]
-            # Verification is a cheap binary check — always use free
             verdict, _, _ = await openrouter_client.chat_completion(
                 messages=messages,
                 task_type="general",
@@ -241,7 +245,6 @@ class OrchestratorGraph:
             )
             if "FAIL" in verdict.upper():
                 logger.info("Verify node: step '%s' flagged as FAIL", step.description[:50])
-                # Don't override – just log for now
         except Exception as exc:
             logger.debug("verify_node error (non-fatal): %s", exc)
 
@@ -339,7 +342,7 @@ class OrchestratorGraph:
         return state
 
     async def _deliver_node(self, state: TaskState) -> TaskState:
-        """Synthesize the final answer using the best available model, then mark complete."""
+        """Synthesize the final answer, then mark complete."""
         completed = [s for s in state.plan if s.status == StepStatus.completed]
         failed = [s for s in state.plan if s.status == StepStatus.failed]
 
@@ -352,49 +355,55 @@ class OrchestratorGraph:
             ))
             return state
 
-        self._emit(self._event(
-            EventType.thinking,
-            {"message": "Synthesizing final deliverable with premium model…"},
-        ))
+        # Fast path: single llm_only step already produced the full answer.
+        # Skip synthesis to avoid a redundant LLM call that burns rate-limit quota.
+        if (
+            len(completed) == 1
+            and completed[0].tool_used in (None, "llm_only", "")
+            and completed[0].result
+        ):
+            state.result = completed[0].result
+            logger.info("deliver_node: single llm_only step — using result directly")
+        else:
+            self._emit(self._event(
+                EventType.thinking,
+                {"message": "Synthesizing final deliverable…"},
+            ))
 
-        # Build synthesis prompt from all completed step results
-        steps_context = "\n\n".join(
-            f"### Step {i}: {s.description}\n{str(s.result)[:1500]}"
-            for i, s in enumerate(completed, 1)
-            if s.result
-        )
-
-        persona = get_persona(state.goal)
-        synthesis_messages = [
-            {
-                "role": "system",
-                "content": persona.delivery_system,
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Original goal: {state.goal}\n\n"
-                    f"Work completed so far:\n{steps_context}\n\n"
-                    "Produce the final, complete deliverable now:"
-                ),
-            },
-        ]
-
-        try:
-            synthesis, model, cost = await openrouter_client.chat_completion(
-                messages=synthesis_messages,
-                task_type="synthesis",
-                quality=ModelQuality.FREE,
-                max_tokens=4096,
-                temperature=0.6,
+            steps_context = "\n\n".join(
+                f"### Step {i}: {s.description}\n{str(s.result)[:1500]}"
+                for i, s in enumerate(completed, 1)
+                if s.result
             )
-            state.result = synthesis
-            state.total_cost_usd += cost
-            state.model_used = model
-            logger.info("Final synthesis by %s (cost=$%.6f)", model, cost)
-        except Exception as exc:
-            logger.warning("deliver_node LLM synthesis failed, using raw concat: %s", exc)
-            state.result = self._summarize_results(completed, state.goal)
+
+            persona = get_persona(state.goal)
+            synthesis_messages = [
+                {"role": "system", "content": persona.delivery_system},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Original goal: {state.goal}\n\n"
+                        f"Work completed so far:\n{steps_context}\n\n"
+                        "Produce the final, complete deliverable now:"
+                    ),
+                },
+            ]
+
+            try:
+                synthesis, model, cost = await openrouter_client.chat_completion(
+                    messages=synthesis_messages,
+                    task_type="synthesis",
+                    quality=ModelQuality.FREE,
+                    max_tokens=4096,
+                    temperature=0.6,
+                )
+                state.result = synthesis
+                state.total_cost_usd += cost
+                state.model_used = model
+                logger.info("Final synthesis by %s (cost=$%.6f)", model, cost)
+            except Exception as exc:
+                logger.warning("deliver_node LLM synthesis failed, using raw concat: %s", exc)
+                state.result = self._summarize_results(completed, state.goal)
 
         state.status = TaskStatus.completed
         state.updated_at = datetime.utcnow()
