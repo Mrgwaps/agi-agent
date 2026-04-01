@@ -277,6 +277,22 @@ class ExecutorService:
         """Ask the LLM to produce the correct JSON input for a tool call."""
         import json
 
+        # Fast-path: simple tools have predictable inputs, no LLM needed
+        tool_name = (step.tool_used or "").lower()
+        desc = step.description
+
+        if "web_researcher" in tool_name or "researcher" in tool_name:
+            return {"research_question": desc, "depth": "standard"}
+        if "web_search" in tool_name or "enhanced_search" in tool_name:
+            import re
+            query = re.sub(r'^(search for|look up|find|research|search)\s*:?\s*', '', desc, flags=re.I).strip() or desc
+            return {"query": query}
+        if "content_writer" in tool_name:
+            return {"topic": desc, "instructions": desc}
+        if "filesystem" in tool_name:
+            return {"path": ".", "operation": "list"}
+
+        # Complex tools: use LLM to generate input
         schema_str = json.dumps(tool_schema, indent=2)
         history = self._format_history(state)
 

@@ -159,14 +159,27 @@ class WebResearcherTool(BaseTool):
                     return results
 
                 loop = asyncio.get_running_loop()
-                results = await loop.run_in_executor(None, _sync)
+                try:
+                    results = await asyncio.wait_for(
+                        loop.run_in_executor(None, _sync),
+                        timeout=8.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("DuckDuckGo search timed out for '%s'", query[:50])
+                    results = []
                 return query, results
             except Exception as exc:
                 logger.warning("Search failed for '%s': %s", query[:50], exc)
                 return query, []
 
         tasks = [_single_search(q) for q in queries]
-        pairs = await asyncio.gather(*tasks)
+        results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+        pairs = []
+        for item in results_raw:
+            if isinstance(item, Exception):
+                logger.warning("Search task failed: %s", item)
+            else:
+                pairs.append(item)
         return {q: r for q, r in pairs}
 
     async def _fetch_top_pages(
@@ -204,8 +217,8 @@ class WebResearcherTool(BaseTool):
             except Exception:
                 return {"url": url, "content": ""}
 
-        pages = await asyncio.gather(*[_fetch(u) for u in urls_to_fetch])
-        return [p for p in pages if p["content"]]
+        pages_raw = await asyncio.gather(*[_fetch(u) for u in urls_to_fetch], return_exceptions=True)
+        return [p for p in pages_raw if isinstance(p, dict) and p.get("content")]
 
     async def _synthesize(
         self,

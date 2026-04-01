@@ -325,7 +325,7 @@ class OpenRouterClient:
             payload["response_format"] = {"type": "json_object"}
 
         t0 = time.monotonic()
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self._base_url}/chat/completions",
                 headers=self._headers,
