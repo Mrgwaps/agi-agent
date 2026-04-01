@@ -103,33 +103,38 @@ async def stream_events(request: Request, task_id: str) -> EventSourceResponse:
     await _get_task_or_404(task_id)
 
     async def generator() -> AsyncGenerator[Dict[str, Any], None]:
-        # 1. Replay historical events
+        state = await session_memory.load_state(task_id)
+        orch = _active.get(task_id)
+
+        terminal_statuses = {TaskStatus.completed, TaskStatus.failed, TaskStatus.aborted}
+
+        if orch is None and state and state.status in terminal_statuses:
+            # Task already finished — send only the final summary, not full history
+            final_event = AgentEvent(
+                taskId=task_id,
+                eventType=EventType.task_completed
+                if state.status == TaskStatus.completed
+                else EventType.task_failed,
+                payload={
+                    "status": state.status,
+                    "result": (state.result or "")[:500] if state.status == TaskStatus.completed else None,
+                    "replayed": True,
+                },
+            )
+            yield {"data": final_event.model_dump_json(), "event": final_event.eventType.value}
+            return
+
+        # 1. Replay historical events (task is running or just started)
         past_events = await session_memory.get_events(task_id)
         for event in past_events:
             yield {"data": event.model_dump_json(), "event": event.eventType.value}
 
-        # 2. If orchestrator is active, stream live events
-        orch = _active.get(task_id)
+        # 2. Stream live events if orchestrator is active
         if orch is not None:
             async for event in orch.event_stream():
                 if await request.is_disconnected():
                     break
                 yield {"data": event.model_dump_json(), "event": event.eventType.value}
-        else:
-            # Task already finished – send a final status event and close
-            state = await session_memory.load_state(task_id)
-            if state:
-                final_event = AgentEvent(
-                    taskId=task_id,
-                    eventType=EventType.task_completed
-                    if state.status == TaskStatus.completed
-                    else EventType.task_failed,
-                    payload={"status": state.status, "replayed": True},
-                )
-                yield {
-                    "data": final_event.model_dump_json(),
-                    "event": final_event.eventType.value,
-                }
 
     return EventSourceResponse(generator())
 

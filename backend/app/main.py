@@ -55,6 +55,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("ChromaDB unavailable: %s", exc)
 
+    # Mark any tasks that were left in a running/queued state as failed
+    # (they had no active orchestrator after the server restarted)
+    try:
+        from app.models.task import TaskStatus
+        stale_statuses = {TaskStatus.running, TaskStatus.queued, TaskStatus.planning}
+        task_ids = await session_memory.list_task_ids(limit=100)
+        stale_count = 0
+        for tid in task_ids:
+            state = await session_memory.load_state(tid)
+            if state and state.status in stale_statuses:
+                state.status = TaskStatus.failed
+                if not state.result:
+                    state.result = "Task interrupted — server restarted."
+                await session_memory.save_state(state)
+                stale_count += 1
+        if stale_count:
+            logger.info("Marked %d stale task(s) as failed on startup", stale_count)
+    except Exception as exc:
+        logger.warning("Failed to clean up stale tasks: %s", exc)
+
     # Start 30-minute heartbeat intelligence loop (uses background_openrouter_client)
     from app.api.heartbeat import heartbeat_loop
     _heartbeat_task = asyncio.create_task(heartbeat_loop())

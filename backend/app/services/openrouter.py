@@ -1,15 +1,12 @@
 """
-OpenRouter client — Claude models as primary, free models as fallback.
+OpenRouter client — tiered model routing.
 
-Primary models (paid via OpenRouter, reliable, fast):
-  FREE tier     → anthropic/claude-haiku-4-5      cheap + fast
-  BALANCED tier → anthropic/claude-sonnet-4-6     capable
-  PREMIUM tier  → anthropic/claude-opus-4-6       most capable
+FREE tier     → Gemini Flash / Gemma free models (no credits needed, fast)
+BALANCED tier → Claude Haiku (cheap paid, reliable)
+PREMIUM tier  → Claude Sonnet (capable paid)
 
-Free fallback models (used when Claude fails with 4xx/5xx):
-  google/gemini-2.0-flash-exp:free
-  meta-llama/llama-3.3-70b-instruct:free
-  google/gemma-3-27b-it:free
+Free models are tried in priority order; each gets its own backoff so a
+429 on one model doesn't block the others.
 """
 from __future__ import annotations
 
@@ -38,13 +35,16 @@ CLAUDE_HAIKU  = "anthropic/claude-haiku-4-5"
 CLAUDE_SONNET = "anthropic/claude-sonnet-4-6"
 CLAUDE_OPUS   = "anthropic/claude-opus-4-6"
 
-# ── Free fallback models ────────────────────────────────────────────────────
+# ── Free models — priority order (fastest/most capable first) ──────────────
+# These are used for FREE tier AND as fallback when paid models fail.
 FREE_MODELS: List[str] = [
-    "google/gemini-2.0-flash-exp:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-3-27b-it:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",       # fast, high quality, best first
+    "google/gemma-3-27b-it:free",             # capable Gemma
+    "google/gemma-3-12b-it:free",             # smaller Gemma, faster
+    "meta-llama/llama-3.3-70b-instruct:free", # strong Llama
+    "qwen/qwen-2.5-72b-instruct:free",        # strong Qwen
+    "meta-llama/llama-3.1-8b-instruct:free",  # fast small model
+    "mistralai/mistral-7b-instruct:free",     # lightweight fallback
 ]
 
 # ── Cost per 1M tokens (input, output) ────────────────────────────────────
@@ -55,26 +55,21 @@ MODEL_COSTS: Dict[str, Tuple[float, float]] = {
     **{m: (0.0, 0.0) for m in FREE_MODELS},
 }
 
-# task_type → (primary model, premium model)
-TASK_MODEL_MAP: Dict[str, Tuple[str, str]] = {
-    "planning":   (CLAUDE_HAIKU,  CLAUDE_SONNET),
-    "structured": (CLAUDE_HAIKU,  CLAUDE_HAIKU),
-    "general":    (CLAUDE_HAIKU,  CLAUDE_SONNET),
-    "analysis":   (CLAUDE_SONNET, CLAUDE_SONNET),
-    "web":        (CLAUDE_HAIKU,  CLAUDE_SONNET),
-    "code":       (CLAUDE_SONNET, CLAUDE_OPUS),
-    "writing":    (CLAUDE_SONNET, CLAUDE_OPUS),
-    "synthesis":  (CLAUDE_SONNET, CLAUDE_OPUS),
-    "delivery":   (CLAUDE_SONNET, CLAUDE_OPUS),
+# ── Tier → (balanced model, premium model) ────────────────────────────────
+# FREE quality never uses paid models — goes straight to free models.
+# BALANCED uses Claude Haiku (cheap). PREMIUM uses Claude Sonnet.
+PAID_MODEL_MAP: Dict[str, Tuple[str, str]] = {
+    # quality → (balanced, premium)
+    "balanced": (CLAUDE_HAIKU,  CLAUDE_HAIKU),
+    "premium":  (CLAUDE_HAIKU,  CLAUDE_SONNET),
 }
 
 # Rate-limit retry config
-_RETRY_WAIT_1  = 15.0   # wait before retry on same model
-_RETRY_WAIT_2  = 30.0   # wait before second retry
-_FALLBACK_WAIT =  5.0   # wait before trying free fallback
-_MAX_TOTAL_WAIT = 120.0
-_JITTER_RANGE  =   3.0
-_GLOBAL_MIN_INTERVAL = 0.5  # seconds between calls (Claude has generous RPM)
+_RETRY_WAIT_1  = 15.0   # wait before retry on same paid model
+_RETRY_WAIT_2  = 30.0   # wait before second paid retry
+_FREE_BACKOFF  = 65.0   # per-model backoff after free model 429
+_JITTER_RANGE  =  3.0
+_GLOBAL_MIN_INTERVAL = 0.3  # seconds between calls
 
 
 def _jitter(base: float, cap: float = 60.0) -> float:
@@ -112,6 +107,9 @@ def infer_quality(
 
     if any(k in desc_lower for k in _premium_kw):
         return ModelQuality.PREMIUM
+
+    if task_type in ("code", "analysis"):
+        return ModelQuality.BALANCED
 
     if any(k in goal.lower() for k in _writing_goal_kw):
         return ModelQuality.BALANCED
@@ -156,22 +154,19 @@ class OpenRouterClient:
         costs = MODEL_COSTS.get(model, (0.001, 0.001))
         return (input_tokens * costs[0] + output_tokens * costs[1]) / 1_000_000
 
-    def _pick_claude_model(self, task_type: str, quality: ModelQuality) -> str:
-        primary, premium = TASK_MODEL_MAP.get(task_type, TASK_MODEL_MAP["general"])
+    def _pick_paid_model(self, quality: ModelQuality) -> str:
         if quality == ModelQuality.PREMIUM:
-            return premium
-        if quality == ModelQuality.BALANCED:
-            # Use Sonnet for balanced tasks
-            return CLAUDE_SONNET
-        return primary  # Haiku for FREE/general
+            return PAID_MODEL_MAP["premium"][1]   # Claude Sonnet
+        return PAID_MODEL_MAP["balanced"][0]       # Claude Haiku
 
     def _available_free_models(self) -> List[str]:
+        """Return free models not currently in backoff, preserving priority order."""
         now = time.monotonic()
         available = [m for m in FREE_MODELS if self._model_backoff.get(m, 0) <= now]
         if available:
-            random.shuffle(available)
             return available
-        return list(FREE_MODELS)
+        # All in backoff — find the one whose backoff expires soonest
+        return [min(FREE_MODELS, key=lambda m: self._model_backoff.get(m, 0))]
 
     async def chat_completion(
         self,
@@ -189,7 +184,6 @@ class OpenRouterClient:
 
         return await self._call_with_fallback(
             messages=messages,
-            task_type=task_type,
             quality=quality,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -199,7 +193,6 @@ class OpenRouterClient:
     async def _call_with_fallback(
         self,
         messages: List[Dict[str, Any]],
-        task_type: str,
         quality: ModelQuality,
         temperature: float,
         max_tokens: int,
@@ -208,79 +201,101 @@ class OpenRouterClient:
         if not self._api_key:
             raise ValueError("OPENROUTER_API_KEY is not set.")
 
-        claude_model = self._pick_claude_model(task_type, quality)
         last_exc: Exception = RuntimeError("No models available")
-        total_waited = 0.0
 
-        # ── Try Claude model (primary) ──────────────────────────────────────
-        # Attempt 1: immediate
-        # Attempt 2: after short wait (15s)
-        # Attempt 3: after another wait (30s)
-        claude_schedule = [
-            (claude_model, 0.0),
-            (claude_model, _RETRY_WAIT_1),
-            (claude_model, _RETRY_WAIT_2),
-        ]
+        # ── FREE quality: go straight to free models, no paid credits used ──
+        if quality == ModelQuality.FREE:
+            return await self._try_free_models(messages, temperature, max_tokens, json_mode)
 
-        for model, pre_wait in claude_schedule:
+        # ── BALANCED / PREMIUM: try paid Claude first ─────────────────────
+        paid_model = self._pick_paid_model(quality)
+
+        for attempt, pre_wait in enumerate([0.0, _RETRY_WAIT_1, _RETRY_WAIT_2]):
             if pre_wait > 0:
                 wait = _jitter(pre_wait)
-                logger.info(
-                    "Claude rate-limited — waiting %.0fs before retry (model=%s)",
-                    wait, model,
-                )
+                logger.info("Claude rate-limited — waiting %.0fs (model=%s)", wait, paid_model)
                 await asyncio.sleep(wait)
-                total_waited += wait
 
             now = time.monotonic()
-            remaining = self._model_backoff.get(model, 0) - now
-            if remaining > 0 and pre_wait == 0:
-                # Model is in backoff from a previous request — skip to free fallback
-                logger.info("Claude model %s in backoff (%.0fs) — trying free fallback", model, remaining)
+            if self._model_backoff.get(paid_model, 0) > now and attempt == 0:
+                logger.info("Claude %s in backoff — trying free models first", paid_model)
                 break
 
             try:
-                result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
-                return result
+                return await self._single_call(paid_model, messages, temperature, max_tokens, json_mode)
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status == 429:
-                    retry_after_raw = exc.response.headers.get("Retry-After", "")
                     try:
-                        hint = float(retry_after_raw)
+                        hint = float(exc.response.headers.get("Retry-After", "30"))
                     except (ValueError, TypeError):
                         hint = 30.0
-                    self._model_backoff[model] = time.monotonic() + hint
-                    logger.warning("429 on Claude %s (Retry-After=%.0fs)", model, hint)
+                    self._model_backoff[paid_model] = time.monotonic() + hint
+                    logger.warning("429 on Claude %s (Retry-After=%.0fs)", paid_model, hint)
                     last_exc = exc
                     continue
                 elif status in (401, 402, 403):
-                    logger.warning("HTTP %d on Claude model %s — falling back to free", status, model)
+                    logger.warning("HTTP %d on Claude %s — falling back to free", status, paid_model)
                     last_exc = exc
-                    break  # don't retry paid model on auth/billing errors
-                logger.warning("HTTP %d from %s: %s", status, model, exc.response.text[:200])
+                    break
+                logger.warning("HTTP %d from %s: %s", status, paid_model, exc.response.text[:200])
                 last_exc = exc
             except Exception as exc:
-                logger.warning("Error on Claude model %s: %s", model, exc)
+                logger.warning("Claude %s error: %s", paid_model, exc)
                 last_exc = exc
 
-        # ── Fallback to free models ────────────────────────────────────────
-        logger.info("Falling back to free models after Claude failure")
-        await asyncio.sleep(_jitter(_FALLBACK_WAIT))
+        # Claude failed — fall back to free models
+        logger.info("Claude failed (%s), falling back to free models", last_exc)
+        try:
+            return await self._try_free_models(messages, temperature, max_tokens, json_mode)
+        except Exception as exc:
+            raise last_exc from exc
 
-        for free_model in self._available_free_models()[:3]:
+    async def _try_free_models(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> Tuple[str, str, float]:
+        """
+        Try each free model in priority order. On 429, mark that model as
+        backed off and immediately try the next one — no sleeping between models.
+        """
+        last_exc: Exception = RuntimeError("All free models failed")
+
+        candidates = self._available_free_models()
+        for model in candidates:
+            # If model is in backoff, wait until it clears (or skip if another is available)
+            now = time.monotonic()
+            wait_until = self._model_backoff.get(model, 0)
+            if wait_until > now:
+                remaining = wait_until - now
+                other_available = [m for m in FREE_MODELS
+                                   if m != model and self._model_backoff.get(m, 0) <= now]
+                if other_available:
+                    continue  # skip, another model is ready
+                logger.info("All free models in backoff; waiting %.0fs for %s", remaining, model)
+                await asyncio.sleep(min(remaining, _FREE_BACKOFF) + _jitter(0))
+
             try:
-                result = await self._single_call(free_model, messages, temperature, max_tokens, json_mode)
-                logger.info("Free model %s succeeded as fallback", free_model)
+                result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
+                logger.info("Free model %s succeeded", model)
                 return result
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status == 429:
-                    self._model_backoff[free_model] = time.monotonic() + 60.0
-                logger.warning("Free model %s failed (HTTP %d)", free_model, status)
+                    try:
+                        hint = float(exc.response.headers.get("Retry-After", str(_FREE_BACKOFF)))
+                    except (ValueError, TypeError):
+                        hint = _FREE_BACKOFF
+                    self._model_backoff[model] = time.monotonic() + hint
+                    logger.warning("Free model %s 429 (backoff=%.0fs) — trying next", model, hint)
+                else:
+                    logger.warning("Free model %s HTTP %d", model, status)
                 last_exc = exc
             except Exception as exc:
-                logger.warning("Free model %s error: %s", free_model, exc)
+                logger.warning("Free model %s error: %s", model, exc)
                 last_exc = exc
 
         raise last_exc
