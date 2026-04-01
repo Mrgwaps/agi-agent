@@ -1,12 +1,14 @@
 """
-OpenRouter client — tiered model routing.
+Multi-provider LLM client — OpenRouter + HuggingFace in parallel.
 
-FREE tier     → Gemini Flash / Gemma free models (no credits needed, fast)
-BALANCED tier → Claude Haiku (cheap paid, reliable)
-PREMIUM tier  → Claude Sonnet (capable paid)
+Tier strategy:
+  FREE     → Race top OR free models + HF fast models simultaneously.
+             First response wins; totally separate rate-limit quotas.
+  BALANCED → Claude Haiku (paid, reliable). Falls back to parallel race.
+  PREMIUM  → Claude Sonnet (paid). Falls back to HF 70B models.
 
-Free models are tried in priority order; each gets its own backoff so a
-429 on one model doesn't block the others.
+With both providers racing, 429s on one don't stall the pipeline —
+the other provider's response arrives in seconds.
 """
 from __future__ import annotations
 
@@ -30,50 +32,59 @@ class ModelQuality(str, Enum):
     PREMIUM  = "premium"
 
 
-# ── Claude models (OpenRouter paid) ────────────────────────────────────────
+# ── OpenRouter paid models ──────────────────────────────────────────────────
 CLAUDE_HAIKU  = "anthropic/claude-haiku-4-5"
 CLAUDE_SONNET = "anthropic/claude-sonnet-4-6"
 CLAUDE_OPUS   = "anthropic/claude-opus-4-6"
 
-# ── Free models — priority order (fastest/most capable first) ──────────────
-# These are used for FREE tier AND as fallback when paid models fail.
-FREE_MODELS: List[str] = [
-    "google/gemini-2.0-flash-exp:free",       # fast, high quality, best first
-    "google/gemma-3-27b-it:free",             # capable Gemma
-    "google/gemma-3-12b-it:free",             # smaller Gemma, faster
-    "meta-llama/llama-3.3-70b-instruct:free", # strong Llama
-    "qwen/qwen-2.5-72b-instruct:free",        # strong Qwen
-    "meta-llama/llama-3.1-8b-instruct:free",  # fast small model
-    "mistralai/mistral-7b-instruct:free",     # lightweight fallback
+# ── OpenRouter free models (priority order) ─────────────────────────────────
+OR_FREE_MODELS: List[str] = [
+    "google/gemini-2.0-flash-exp:free",
+    "google/gemma-3-27b-it:free",
+    "google/gemma-3-12b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
 ]
 
-# ── Cost per 1M tokens (input, output) ────────────────────────────────────
+# ── HuggingFace serverless inference models ─────────────────────────────────
+# Fast models for FREE tier — race these against OpenRouter free models.
+HF_BASE_URL = "https://router.huggingface.co/v1"
+
+HF_FREE_MODELS: List[str] = [
+    "meta-llama/Meta-Llama-3.1-8B-Instruct",   # fast, reliable
+    "Qwen/Qwen2.5-7B-Instruct",                 # fast, efficient
+    "microsoft/Phi-3.5-mini-instruct",           # very fast small model
+    "mistralai/Mistral-7B-Instruct-v0.3",        # solid fallback
+]
+
+# Capable HF models for BALANCED/PREMIUM fallback
+HF_BALANCED_MODELS: List[str] = [
+    "meta-llama/Llama-3.3-70B-Instruct",
+    "Qwen/Qwen2.5-72B-Instruct",
+]
+
+# ── Cost tracking ────────────────────────────────────────────────────────────
 MODEL_COSTS: Dict[str, Tuple[float, float]] = {
     CLAUDE_HAIKU:  (1.00,  5.00),
     CLAUDE_SONNET: (3.00, 15.00),
     CLAUDE_OPUS:   (5.00, 25.00),
-    **{m: (0.0, 0.0) for m in FREE_MODELS},
+    **{m: (0.0, 0.0) for m in OR_FREE_MODELS},
+    **{m: (0.0, 0.0) for m in HF_FREE_MODELS},
+    **{m: (0.0, 0.0) for m in HF_BALANCED_MODELS},
 }
 
-# ── Tier → (balanced model, premium model) ────────────────────────────────
-# FREE quality never uses paid models — goes straight to free models.
-# BALANCED uses Claude Haiku (cheap). PREMIUM uses Claude Sonnet.
-PAID_MODEL_MAP: Dict[str, Tuple[str, str]] = {
-    # quality → (balanced, premium)
-    "balanced": (CLAUDE_HAIKU,  CLAUDE_HAIKU),
-    "premium":  (CLAUDE_HAIKU,  CLAUDE_SONNET),
-}
-
-# Rate-limit retry config
-_RETRY_WAIT_1  = 15.0   # wait before retry on same paid model
-_RETRY_WAIT_2  = 30.0   # wait before second paid retry
-_FREE_BACKOFF  = 65.0   # per-model backoff after free model 429
-_JITTER_RANGE  =  3.0
-_GLOBAL_MIN_INTERVAL = 0.3  # seconds between calls
+# ── Backoff config ───────────────────────────────────────────────────────────
+_RETRY_WAIT_1      = 10.0   # wait before first retry on paid model
+_RETRY_WAIT_2      = 20.0   # wait before second retry on paid model
+_FREE_BACKOFF      = 60.0   # per-model backoff after free model 429
+_GLOBAL_MIN_INTERVAL = 0.2  # min gap between call initiations
+_RACE_TIMEOUT      = 25.0   # max seconds to wait for any single race call
 
 
-def _jitter(base: float, cap: float = 60.0) -> float:
-    return min(base + random.uniform(0, _JITTER_RANGE), cap)
+def _jitter(base: float) -> float:
+    return base + random.uniform(0, 2.0)
 
 
 def infer_quality(
@@ -83,7 +94,7 @@ def infer_quality(
     task_type: str = "general",
     has_budget: bool = False,
 ) -> ModelQuality:
-    """Return model quality tier for a step."""
+    """Route a step to the appropriate model quality tier."""
     desc_lower = step_description.lower()
 
     _premium_kw = frozenset({
@@ -117,56 +128,57 @@ def infer_quality(
     return ModelQuality.FREE
 
 
-class OpenRouterClient:
+class MultiProviderClient:
     """
-    Async OpenRouter client that routes to Claude models by default.
+    Agentic LLM client that races OpenRouter and HuggingFace in parallel.
 
-    Strategy:
-    1. Try the appropriate Claude model (Haiku/Sonnet/Opus).
-    2. On 429 → wait briefly, retry same model.
-    3. On persistent 429 or 5xx → try a free fallback model.
-    4. Free fallback models rotate on failure.
+    For FREE-tier calls, up to 4 models (mix of OR + HF) are launched
+    simultaneously. The first successful response is used; the rest are
+    cancelled. This gives:
+      - Speed: fastest provider wins (usually 1-3s)
+      - Resilience: 429 on one provider doesn't stall; the other responds
+      - No waiting: never sits idle waiting for a backed-off model
     """
 
-    def __init__(self, max_concurrent: int = 3) -> None:
+    def __init__(self, max_concurrent: int = 6) -> None:
         self._session_cost: float = 0.0
-        self._base_url = settings.openrouter_base_url
-        self._api_key = settings.openrouter_api_key
-        self._headers = {
-            "Authorization": f"Bearer {self._api_key}",
+
+        # OpenRouter config
+        self._or_base_url  = settings.openrouter_base_url
+        self._or_api_key   = settings.openrouter_api_key
+        self._or_headers   = {
+            "Authorization": f"Bearer {self._or_api_key}",
             "HTTP-Referer": settings.openrouter_site_url,
-            "X-Title": settings.openrouter_app_name,
+            "X-Title":      settings.openrouter_app_name,
             "Content-Type": "application/json",
         }
-        self._model_backoff: Dict[str, float] = {}
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._last_call_time: float = 0.0
-        self._call_lock = asyncio.Lock()
+
+        # HuggingFace config
+        self._hf_api_key  = settings.huggingface_api_key
+        self._hf_headers  = {
+            "Authorization": f"Bearer {self._hf_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        self._or_backoff:  Dict[str, float] = {}
+        self._hf_backoff:  Dict[str, float] = {}
+
+        self._semaphore    = asyncio.Semaphore(max_concurrent)
+        self._last_call_ts: float = 0.0
+        self._rate_lock    = asyncio.Lock()
+
+    # ── Public ───────────────────────────────────────────────────────────────
 
     @property
     def session_cost(self) -> float:
         return self._session_cost
 
     def get_free_models(self) -> List[str]:
-        return list(FREE_MODELS)
+        return list(OR_FREE_MODELS)
 
     def estimate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
         costs = MODEL_COSTS.get(model, (0.001, 0.001))
         return (input_tokens * costs[0] + output_tokens * costs[1]) / 1_000_000
-
-    def _pick_paid_model(self, quality: ModelQuality) -> str:
-        if quality == ModelQuality.PREMIUM:
-            return PAID_MODEL_MAP["premium"][1]   # Claude Sonnet
-        return PAID_MODEL_MAP["balanced"][0]       # Claude Haiku
-
-    def _available_free_models(self) -> List[str]:
-        """Return free models not currently in backoff, preserving priority order."""
-        now = time.monotonic()
-        available = [m for m in FREE_MODELS if self._model_backoff.get(m, 0) <= now]
-        if available:
-            return available
-        # All in backoff — find the one whose backoff expires soonest
-        return [min(FREE_MODELS, key=lambda m: self._model_backoff.get(m, 0))]
 
     async def chat_completion(
         self,
@@ -181,16 +193,11 @@ class OpenRouterClient:
     ) -> Tuple[str, str, float]:
         if force_free:
             quality = ModelQuality.FREE
+        return await self._route(messages, quality, temperature, max_tokens, json_mode)
 
-        return await self._call_with_fallback(
-            messages=messages,
-            quality=quality,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            json_mode=json_mode,
-        )
+    # ── Routing ──────────────────────────────────────────────────────────────
 
-    async def _call_with_fallback(
+    async def _route(
         self,
         messages: List[Dict[str, Any]],
         quality: ModelQuality,
@@ -198,60 +205,51 @@ class OpenRouterClient:
         max_tokens: int,
         json_mode: bool,
     ) -> Tuple[str, str, float]:
-        if not self._api_key:
-            raise ValueError("OPENROUTER_API_KEY is not set.")
+        if not self._or_api_key:
+            raise ValueError("OPENROUTER_API_KEY is not set in backend/.env")
 
-        last_exc: Exception = RuntimeError("No models available")
-
-        # ── FREE quality: go straight to free models, no paid credits used ──
         if quality == ModelQuality.FREE:
-            return await self._try_free_models(messages, temperature, max_tokens, json_mode)
+            return await self._race_free(messages, temperature, max_tokens, json_mode)
 
-        # ── BALANCED / PREMIUM: try paid Claude first ─────────────────────
-        paid_model = self._pick_paid_model(quality)
+        # BALANCED: Claude Haiku first, then race on failure
+        # PREMIUM:  Claude Sonnet first, then race HF balanced on failure
+        paid = CLAUDE_HAIKU if quality == ModelQuality.BALANCED else CLAUDE_SONNET
 
-        for attempt, pre_wait in enumerate([0.0, _RETRY_WAIT_1, _RETRY_WAIT_2]):
-            if pre_wait > 0:
-                wait = _jitter(pre_wait)
-                logger.info("Claude rate-limited — waiting %.0fs (model=%s)", wait, paid_model)
-                await asyncio.sleep(wait)
-
-            now = time.monotonic()
-            if self._model_backoff.get(paid_model, 0) > now and attempt == 0:
-                logger.info("Claude %s in backoff — trying free models first", paid_model)
-                break
-
-            try:
-                return await self._single_call(paid_model, messages, temperature, max_tokens, json_mode)
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status == 429:
-                    try:
-                        hint = float(exc.response.headers.get("Retry-After", "30"))
-                    except (ValueError, TypeError):
-                        hint = 30.0
-                    self._model_backoff[paid_model] = time.monotonic() + hint
-                    logger.warning("429 on Claude %s (Retry-After=%.0fs)", paid_model, hint)
-                    last_exc = exc
-                    continue
-                elif status in (401, 402, 403):
-                    logger.warning("HTTP %d on Claude %s — falling back to free", status, paid_model)
-                    last_exc = exc
+        now = time.monotonic()
+        if self._or_backoff.get(paid, 0) <= now:
+            for pre_wait in [0.0, _RETRY_WAIT_1, _RETRY_WAIT_2]:
+                if pre_wait:
+                    await asyncio.sleep(_jitter(pre_wait))
+                try:
+                    return await self._call_or(paid, messages, temperature, max_tokens, json_mode)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 429:
+                        try:
+                            hint = float(exc.response.headers.get("Retry-After", "20"))
+                        except (ValueError, TypeError):
+                            hint = 20.0
+                        self._or_backoff[paid] = time.monotonic() + hint
+                        logger.warning("429 on %s (backoff=%.0fs)", paid, hint)
+                        if pre_wait == _RETRY_WAIT_2:
+                            break  # exhausted retries
+                        continue
+                    elif exc.response.status_code in (401, 402, 403):
+                        logger.warning("HTTP %d on %s — skipping paid", exc.response.status_code, paid)
+                        break
+                    raise
+                except Exception as exc:
+                    logger.warning("%s error: %s", paid, exc)
                     break
-                logger.warning("HTTP %d from %s: %s", status, paid_model, exc.response.text[:200])
-                last_exc = exc
-            except Exception as exc:
-                logger.warning("Claude %s error: %s", paid_model, exc)
-                last_exc = exc
 
-        # Claude failed — fall back to free models
-        logger.info("Claude failed (%s), falling back to free models", last_exc)
-        try:
-            return await self._try_free_models(messages, temperature, max_tokens, json_mode)
-        except Exception as exc:
-            raise last_exc from exc
+        # Paid model failed — race free/balanced models from both providers
+        logger.info("%s unavailable, racing fallback models", paid)
+        if quality == ModelQuality.PREMIUM:
+            return await self._race_balanced_fallback(messages, temperature, max_tokens, json_mode)
+        return await self._race_free(messages, temperature, max_tokens, json_mode)
 
-    async def _try_free_models(
+    # ── Race engine ──────────────────────────────────────────────────────────
+
+    async def _race_free(
         self,
         messages: List[Dict[str, Any]],
         temperature: float,
@@ -259,47 +257,130 @@ class OpenRouterClient:
         json_mode: bool,
     ) -> Tuple[str, str, float]:
         """
-        Try free models that are currently available (not in backoff).
-        If none are available, immediately use Claude Haiku as cheap fallback
-        rather than waiting — keeps the pipeline responsive.
+        Launch up to 2 OR free models + up to 2 HF free models in parallel.
+        First success wins; losers are cancelled. Falls back to Claude Haiku
+        if every model fails.
         """
         now = time.monotonic()
-        ready = [m for m in FREE_MODELS if self._model_backoff.get(m, 0) <= now]
+        or_ready  = [m for m in OR_FREE_MODELS  if self._or_backoff.get(m, 0) <= now][:2]
+        hf_ready  = (
+            [m for m in HF_FREE_MODELS if self._hf_backoff.get(m, 0) <= now][:2]
+            if self._hf_api_key else []
+        )
 
-        last_exc: Exception = RuntimeError("All free models failed")
+        candidates = []
+        # Interleave OR and HF so we always start one from each provider
+        for or_m, hf_m in zip(or_ready, hf_ready):
+            candidates.extend([("or", or_m), ("hf", hf_m)])
+        # Add any leftover from the longer list
+        for m in or_ready[len(hf_ready):]:
+            candidates.append(("or", m))
+        for m in hf_ready[len(or_ready):]:
+            candidates.append(("hf", m))
 
-        for model in ready[:4]:  # try up to 4 currently-ready free models
+        if not candidates:
+            # Nothing ready — Claude Haiku as immediate fallback
+            logger.info("All free models in backoff — using Claude Haiku")
+            return await self._call_or(CLAUDE_HAIKU, messages, temperature, max_tokens, json_mode)
+
+        result = await self._race(candidates, messages, temperature, max_tokens, json_mode)
+        if result is not None:
+            return result
+
+        # Everything failed — Claude Haiku
+        logger.info("All race candidates failed — falling back to Claude Haiku")
+        return await self._call_or(CLAUDE_HAIKU, messages, temperature, max_tokens, json_mode)
+
+    async def _race_balanced_fallback(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> Tuple[str, str, float]:
+        """Race HF 70B models + Claude Haiku when Sonnet is unavailable."""
+        now = time.monotonic()
+        hf_ready = (
+            [m for m in HF_BALANCED_MODELS if self._hf_backoff.get(m, 0) <= now]
+            if self._hf_api_key else []
+        )
+        candidates = [("hf", m) for m in hf_ready[:2]] + [("or", CLAUDE_HAIKU)]
+        result = await self._race(candidates, messages, temperature, max_tokens, json_mode)
+        if result is not None:
+            return result
+        raise RuntimeError("All PREMIUM fallback models failed")
+
+    async def _race(
+        self,
+        candidates: List[Tuple[str, str]],  # [("or"|"hf", model_id), ...]
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> Optional[Tuple[str, str, float]]:
+        """
+        Launch all candidates in parallel. Return first success, cancel the rest.
+        Returns None if all fail.
+        """
+        async def _guarded(provider: str, model: str) -> Tuple[str, str, float]:
             try:
-                result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
-                logger.info("Free model %s succeeded", model)
-                return result
+                if provider == "hf":
+                    return await asyncio.wait_for(
+                        self._call_hf(model, messages, temperature, max_tokens, json_mode),
+                        timeout=_RACE_TIMEOUT,
+                    )
+                else:
+                    return await asyncio.wait_for(
+                        self._call_or(model, messages, temperature, max_tokens, json_mode),
+                        timeout=_RACE_TIMEOUT,
+                    )
+            except asyncio.TimeoutError:
+                logger.warning("%s/%s timed out after %.0fs", provider, model, _RACE_TIMEOUT)
+                raise
             except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status == 429:
+                if exc.response.status_code == 429:
                     try:
                         hint = float(exc.response.headers.get("Retry-After", str(_FREE_BACKOFF)))
                     except (ValueError, TypeError):
                         hint = _FREE_BACKOFF
-                    self._model_backoff[model] = time.monotonic() + hint
-                    logger.warning("Free model %s 429 (backoff=%.0fs) — trying next", model, hint)
-                else:
-                    logger.warning("Free model %s HTTP %d", model, status)
-                last_exc = exc
-            except Exception as exc:
-                logger.warning("Free model %s error: %s", model, exc)
-                last_exc = exc
+                    if provider == "hf":
+                        self._hf_backoff[model] = time.monotonic() + hint
+                    else:
+                        self._or_backoff[model] = time.monotonic() + hint
+                    logger.debug("%s/%s 429 — backoff %.0fs", provider, model, hint)
+                raise
 
-        # All ready free models failed (or none were available) — fall back to
-        # Claude Haiku immediately. Cheap but reliable, avoids multi-minute waits.
-        logger.info("Free models unavailable/rate-limited — using Claude Haiku fallback")
+        tasks: Dict[asyncio.Task, Tuple[str, str]] = {
+            asyncio.create_task(_guarded(p, m)): (p, m)
+            for p, m in candidates
+        }
+
+        pending = set(tasks)
+        winner  = None
+
         try:
-            return await self._single_call(CLAUDE_HAIKU, messages, temperature, max_tokens, json_mode)
-        except Exception as exc:
-            # If Haiku also fails (no credits), re-raise the original free-model error
-            logger.warning("Claude Haiku fallback also failed: %s", exc)
-            raise last_exc from exc
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    p, m = tasks[task]
+                    if task.exception() is None:
+                        winner = task.result()
+                        logger.info("Race won by %s/%s", p, m)
+                        return winner
+                    else:
+                        logger.debug("Race candidate %s/%s failed: %s", p, m, task.exception())
+        finally:
+            for t in pending:
+                t.cancel()
+            # Let cancelled tasks finish cleanly
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _single_call(
+        return None  # all failed
+
+    # ── Provider-specific calls ───────────────────────────────────────────────
+
+    async def _call_or(
         self,
         model: str,
         messages: List[Dict[str, Any]],
@@ -307,14 +388,8 @@ class OpenRouterClient:
         max_tokens: int,
         json_mode: bool,
     ) -> Tuple[str, str, float]:
-        async with self._semaphore:
-            async with self._call_lock:
-                now = time.monotonic()
-                gap = _GLOBAL_MIN_INTERVAL - (now - self._last_call_time)
-                if gap > 0:
-                    await asyncio.sleep(gap)
-                self._last_call_time = time.monotonic()
-
+        """Single call to OpenRouter."""
+        await self._throttle()
         payload: Dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -327,30 +402,78 @@ class OpenRouterClient:
         t0 = time.monotonic()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                f"{self._base_url}/chat/completions",
-                headers=self._headers,
+                f"{self._or_base_url}/chat/completions",
+                headers=self._or_headers,
                 json=payload,
             )
         resp.raise_for_status()
+        return self._parse_response(resp.json(), model, t0, "OR")
 
-        data = resp.json()
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
+    async def _call_hf(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> Tuple[str, str, float]:
+        """Single call to HuggingFace serverless inference."""
+        if not self._hf_api_key:
+            raise RuntimeError("HF_API_KEY not configured")
 
-        choice = data["choices"][0]
-        text = choice["message"]["content"] or ""
+        await self._throttle()
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        # HF doesn't support json_mode the same way — skip it
 
-        usage = data.get("usage", {})
-        input_tokens = usage.get("prompt_tokens", 0)
-        output_tokens = usage.get("completion_tokens", 0)
+        t0 = time.monotonic()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{HF_BASE_URL}/chat/completions",
+                headers=self._hf_headers,
+                json=payload,
+            )
+        resp.raise_for_status()
+        return self._parse_response(resp.json(), model, t0, "HF")
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    async def _throttle(self) -> None:
+        """Enforce a minimum interval between call initiations."""
+        async with self._semaphore:
+            async with self._rate_lock:
+                now = time.monotonic()
+                gap = _GLOBAL_MIN_INTERVAL - (now - self._last_call_ts)
+                if gap > 0:
+                    await asyncio.sleep(gap)
+                self._last_call_ts = time.monotonic()
+
+    def _parse_response(
+        self,
+        data: Dict[str, Any],
+        model: str,
+        t0: float,
+        provider: str,
+    ) -> Tuple[str, str, float]:
+        elapsed_ms   = int((time.monotonic() - t0) * 1000)
+        choice       = data["choices"][0]
+        text         = choice["message"]["content"] or ""
+        usage        = data.get("usage", {})
+        in_tok       = usage.get("prompt_tokens", 0)
+        out_tok      = usage.get("completion_tokens", 0)
         actual_model = data.get("model", model)
-        cost = self.estimate_cost(actual_model, input_tokens, output_tokens)
+        cost         = self.estimate_cost(actual_model, in_tok, out_tok)
         self._session_cost += cost
-
-        self._model_backoff.pop(actual_model, None)
-
+        # Clear any backoff on success
+        self._or_backoff.pop(actual_model, None)
+        self._hf_backoff.pop(actual_model, None)
         logger.info(
-            "OpenRouter [%s] tokens=%d+%d cost=$%.6f latency=%dms",
-            actual_model, input_tokens, output_tokens, cost, elapsed_ms,
+            "[%s/%s] tokens=%d+%d cost=$%.6f latency=%dms",
+            provider, actual_model, in_tok, out_tok, cost, elapsed_ms,
         )
         return text, actual_model, cost
 
@@ -358,9 +481,10 @@ class OpenRouterClient:
         self._session_cost = 0.0
 
 
-# ── Singletons ──────────────────────────────────────────────────────────────
-# Main client — higher concurrency since Claude has better rate limits
-openrouter_client = OpenRouterClient(max_concurrent=3)
+# ── Backwards-compat alias so existing code that imports OpenRouterClient works
+OpenRouterClient = MultiProviderClient
 
-# Background client for skill researcher / heartbeat
-background_openrouter_client = OpenRouterClient(max_concurrent=1)
+
+# ── Singletons ────────────────────────────────────────────────────────────────
+openrouter_client            = MultiProviderClient(max_concurrent=6)
+background_openrouter_client = MultiProviderClient(max_concurrent=2)
