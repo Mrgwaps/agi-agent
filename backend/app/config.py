@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     cors_allow_methods: List[str] = ["*"]
     cors_allow_headers: List[str] = ["*"]
 
+    # ── Anthropic (Claude) ────────────────────────────────────────────────────
+    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+
     # ── OpenRouter ────────────────────────────────────────────────────────────
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = "https://openrouter.ai/api/v1"

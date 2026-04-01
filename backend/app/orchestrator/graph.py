@@ -399,7 +399,7 @@ class OrchestratorGraph:
                 synthesis, model, cost = await openrouter_client.chat_completion(
                     messages=synthesis_messages,
                     task_type="synthesis",
-                    quality=ModelQuality.FREE,
+                    quality=ModelQuality.PREMIUM,
                     max_tokens=4096,
                     temperature=0.6,
                 )

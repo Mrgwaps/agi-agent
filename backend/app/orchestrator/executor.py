@@ -204,14 +204,6 @@ class ExecutorService:
         history = self._format_history(state)
 
         is_final = (state.currentStep == len(state.plan) - 1)
-        # Always use free models — prevents 402/429 from paid models with no credits.
-        # Set has_budget=True only when OpenRouter credits are confirmed.
-        quality = infer_quality(
-            step_description=step.description,
-            goal=state.goal,
-            is_final_step=is_final,
-            has_budget=False,
-        )
 
         desc_lower = step.description.lower()
         if any(k in desc_lower for k in ("code", "script", "function", "implement", "program")):
@@ -224,6 +216,13 @@ class ExecutorService:
             task_type = "analysis"
         else:
             task_type = "general"
+
+        quality = infer_quality(
+            step_description=step.description,
+            goal=state.goal,
+            is_final_step=is_final,
+            task_type=task_type,
+        )
 
         # Use the persona's executor system prompt — domain-specific intelligence
         system_content = persona.executor_system
