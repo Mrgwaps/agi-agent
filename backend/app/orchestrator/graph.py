@@ -98,8 +98,6 @@ class OrchestratorGraph:
                         )
                         state.currentStep += 1
                 elif current_step.status == StepStatus.completed:
-                    state = await self._verify_node(state)
-                    await self._save(state)
                     state.currentStep += 1
 
             state = await self._deliver_node(state)
@@ -361,11 +359,13 @@ class OrchestratorGraph:
             ))
             return state
 
-        # Fast path: single llm_only step already produced the full answer.
-        # Skip synthesis to avoid a redundant LLM call that burns rate-limit quota.
+        # Fast path: single step already produced the full answer.
+        # Skip synthesis — the step result IS the deliverable.
+        _self_contained_tools = {None, "llm_only", "", "web_researcher", "web_search",
+                                  "enhanced_search", "content_writer"}
         if (
             len(completed) == 1
-            and completed[0].tool_used in (None, "llm_only", "")
+            and completed[0].tool_used in _self_contained_tools
             and completed[0].result
         ):
             state.result = completed[0].result

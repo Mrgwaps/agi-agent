@@ -24,9 +24,9 @@ from app.tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
 
-_MAX_QUERIES = 5
-_MAX_RESULTS_PER_QUERY = 4
-_PAGE_FETCH_TIMEOUT = 15
+_MAX_QUERIES = 3
+_MAX_RESULTS_PER_QUERY = 3
+_PAGE_FETCH_TIMEOUT = 8
 
 
 class WebResearcherTool(BaseTool):
@@ -112,6 +112,18 @@ class WebResearcherTool(BaseTool):
             logger.exception("WebResearcherTool error: %s", exc)
             return {"success": False, "result": None, "error": str(exc)}
 
+    def _generate_queries_template(self, question: str, num_queries: int) -> List[str]:
+        """Generate search queries from templates — no LLM call, instant."""
+        q = question.strip().rstrip("?.")
+        templates = [
+            q,
+            f"{q} 2025 2026",
+            f"{q} latest developments breakthroughs",
+            f"{q} research news update",
+            f"{q} explained overview",
+        ]
+        return templates[:num_queries]
+
     async def _generate_queries(
         self,
         question: str,
@@ -120,45 +132,13 @@ class WebResearcherTool(BaseTool):
         num_queries: int,
         client: Any,
     ) -> List[str]:
-        """Use LLM to generate diverse, targeted search queries."""
+        """Generate search queries. Uses templates to avoid an extra LLM call."""
         if subtopics:
-            # Build queries directly from provided subtopics
             queries = [question] + [f"{question} {t}" for t in subtopics[:num_queries - 1]]
             return queries[:num_queries]
 
-        prompt_parts = [
-            f"Research question: {question}",
-            f"Generate exactly {num_queries} different search queries that together will give comprehensive coverage of this topic.",
-            "Rules:",
-            "- First query: broad overview",
-            "- Remaining queries: specific angles, statistics, expert opinions, practical examples",
-            "- Each query should find DIFFERENT information from the others",
-            "- Use natural search language, not questions",
-            f"Context: {context}" if context else "",
-            "\nReturn ONLY a JSON array of query strings, nothing else.",
-            'Example: ["query one", "query two", "query three"]',
-        ]
-
-        try:
-            text, _, _ = await client.chat_completion(
-                messages=[{"role": "user", "content": "\n".join(p for p in prompt_parts if p)}],
-                task_type="structured",
-                quality=ModelQuality.FREE,
-                max_tokens=256,
-                temperature=0.3,
-            )
-            import json, re
-            text = text.strip()
-            match = re.search(r'\[.*\]', text, re.DOTALL)
-            if match:
-                queries = json.loads(match.group())
-                if isinstance(queries, list) and queries:
-                    return [str(q) for q in queries[:num_queries]]
-        except Exception as exc:
-            logger.warning("Query generation failed, using fallback: %s", exc)
-
-        # Fallback: simple variations
-        return [question, f"{question} guide", f"{question} best practices"][:num_queries]
+        # Use template-based generation — fast, no LLM cost, works well for most topics
+        return self._generate_queries_template(question, num_queries)
 
     async def _run_searches(self, queries: List[str]) -> Dict[str, List[Dict[str, Any]]]:
         """Run all queries in parallel using DuckDuckGo."""
@@ -199,9 +179,9 @@ class WebResearcherTool(BaseTool):
         seen_urls: set[str] = set()
         urls_to_fetch: List[str] = []
         for results in search_results.values():
-            for r in results[:2]:  # top 2 per query
+            for r in results[:1]:  # top 1 per query (faster)
                 url = r.get("url", "")
-                if url and url not in seen_urls and len(urls_to_fetch) < 6:
+                if url and url not in seen_urls and len(urls_to_fetch) < 3:
                     seen_urls.add(url)
                     urls_to_fetch.append(url)
 
@@ -288,8 +268,8 @@ Be specific, accurate, and cite sources. Do not add information not found in the
         text, _, _ = await client.chat_completion(
             messages=[{"role": "user", "content": synthesis_prompt}],
             task_type="analysis",
-            quality=ModelQuality.BALANCED,
-            max_tokens=3000,
+            quality=ModelQuality.FREE,  # Gemini Flash handles synthesis well and is free
+            max_tokens=2000,
             temperature=0.3,
         )
         return text

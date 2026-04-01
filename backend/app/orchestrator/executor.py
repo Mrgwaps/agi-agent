@@ -89,9 +89,10 @@ class ExecutorService:
                 if attempt < MAX_RETRIES:
                     import random
                     if _is_rate_limit(exc):
-                        # 429 bubbled past the client's rotation — wait longer before retry
-                        backoff = 60.0 + random.uniform(0, 15)
-                        logger.warning("429 escaped client rotation; executor waiting %.0fs", backoff)
+                        # 429 bubbled past client rotation (all models backed off).
+                        # Short wait only — the client already tried all fallbacks.
+                        backoff = BASE_BACKOFF + random.uniform(0, 2)
+                        logger.warning("429 escaped client rotation; short wait %.0fs then retry", backoff)
                     else:
                         backoff = (BASE_BACKOFF * attempt) + random.uniform(0, 2)
                     self._emit(self._make_event(

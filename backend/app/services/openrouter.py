@@ -259,25 +259,16 @@ class OpenRouterClient:
         json_mode: bool,
     ) -> Tuple[str, str, float]:
         """
-        Try each free model in priority order. On 429, mark that model as
-        backed off and immediately try the next one — no sleeping between models.
+        Try free models that are currently available (not in backoff).
+        If none are available, immediately use Claude Haiku as cheap fallback
+        rather than waiting — keeps the pipeline responsive.
         """
+        now = time.monotonic()
+        ready = [m for m in FREE_MODELS if self._model_backoff.get(m, 0) <= now]
+
         last_exc: Exception = RuntimeError("All free models failed")
 
-        candidates = self._available_free_models()
-        for model in candidates:
-            # If model is in backoff, wait until it clears (or skip if another is available)
-            now = time.monotonic()
-            wait_until = self._model_backoff.get(model, 0)
-            if wait_until > now:
-                remaining = wait_until - now
-                other_available = [m for m in FREE_MODELS
-                                   if m != model and self._model_backoff.get(m, 0) <= now]
-                if other_available:
-                    continue  # skip, another model is ready
-                logger.info("All free models in backoff; waiting %.0fs for %s", remaining, model)
-                await asyncio.sleep(min(remaining, _FREE_BACKOFF) + _jitter(0))
-
+        for model in ready[:4]:  # try up to 4 currently-ready free models
             try:
                 result = await self._single_call(model, messages, temperature, max_tokens, json_mode)
                 logger.info("Free model %s succeeded", model)
@@ -298,7 +289,15 @@ class OpenRouterClient:
                 logger.warning("Free model %s error: %s", model, exc)
                 last_exc = exc
 
-        raise last_exc
+        # All ready free models failed (or none were available) — fall back to
+        # Claude Haiku immediately. Cheap but reliable, avoids multi-minute waits.
+        logger.info("Free models unavailable/rate-limited — using Claude Haiku fallback")
+        try:
+            return await self._single_call(CLAUDE_HAIKU, messages, temperature, max_tokens, json_mode)
+        except Exception as exc:
+            # If Haiku also fails (no credits), re-raise the original free-model error
+            logger.warning("Claude Haiku fallback also failed: %s", exc)
+            raise last_exc from exc
 
     async def _single_call(
         self,

@@ -260,6 +260,19 @@ class PlannerService:
                 TaskStep(description=f"Use the research to complete: {goal}", tool_used="llm_only"),
             ]
 
+        # ── Research / news / latest developments ────────────────────────────
+        research_triggers = (
+            "research ", "research the ", "find out ", "look up ",
+            "latest ", "recent ", "newest ", "current ", "news about ",
+            "developments in ", "what's new in ", "whats new in ",
+            "trends in ", "state of ", "overview of ", "summary of ",
+            "tell me about ", "learn about ",
+        )
+        if word_count <= 30 and any(t in g for t in research_triggers):
+            return [
+                TaskStep(description=f"Research: {goal}", tool_used="web_researcher"),
+            ]
+
         # ── Straightforward factual / explanatory questions ───────────────────
         question_openers = (
             "what is ", "what are ", "what does ", "how does ", "how do ",
