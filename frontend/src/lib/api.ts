@@ -37,6 +37,7 @@ function normalizeTask(raw: any): TaskState {
     completedAt: raw.completedAt ?? raw.completed_at,
     totalCostUsd: raw.totalCostUsd ?? raw.total_cost_usd ?? 0,
     error: raw.error,
+    result: raw.result,
     pendingApproval: raw.pendingApproval ?? raw.pending_approval,
   };
 }

@@ -161,6 +161,7 @@ def create_app() -> FastAPI:
     from app.api.webhooks import router as webhooks_router
     from app.api.skills import router as skills_router
     from app.api.settings import router as settings_router
+    from app.api.chat import router as chat_router
 
     app.include_router(tasks_router)
     app.include_router(tools_router)
@@ -173,6 +174,7 @@ def create_app() -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(skills_router)
     app.include_router(settings_router)
+    app.include_router(chat_router, prefix="/api")
 
     # ── Health check ─────────────────────────────────────────────────────────
     @app.get("/health", tags=["system"])

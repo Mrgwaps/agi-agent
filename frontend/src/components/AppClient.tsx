@@ -2,9 +2,10 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BrainCircuit, Settings, DollarSign, Activity, TrendingUp, Zap } from 'lucide-react';
+import { BrainCircuit, Settings, DollarSign, Activity, TrendingUp, Zap, MessageSquare, ListTodo } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { TaskSidebar } from '@/components/TaskSidebar';
+import { ChatPanel } from '@/components/ChatPanel';
 import { TaskInput } from '@/components/TaskInput';
 import { TaskView } from '@/components/TaskView';
 import { CostTracker } from '@/components/CostTracker';
@@ -111,6 +112,7 @@ export default function AppClient() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [rightPanel, setRightPanel] = useState<RightPanel>('cost');
   const [showNewTask, setShowNewTask] = useState(false);
+  const [leftPanel, setLeftPanel] = useState<'tasks' | 'chat'>('tasks');
 
   useHeartbeat();
 
@@ -147,7 +149,28 @@ export default function AppClient() {
       />
 
       <div className="flex flex-1 overflow-hidden">
-        <TaskSidebar onNewTask={handleNewTask} />
+        <div className="flex flex-col h-full border-r border-border bg-card" style={{ width: 256 }}>
+          <div className="flex-shrink-0 flex border-b border-border">
+            <button onClick={() => setLeftPanel('tasks')} className={cn(
+              'flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors',
+              leftPanel === 'tasks' ? 'text-primary bg-primary/5 border-b-2 border-primary' : 'text-text-muted hover:text-text'
+            )}>
+              <ListTodo className="w-3.5 h-3.5" />Tasks
+            </button>
+            <button onClick={() => setLeftPanel('chat')} className={cn(
+              'flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors',
+              leftPanel === 'chat' ? 'text-primary bg-primary/5 border-b-2 border-primary' : 'text-text-muted hover:text-text'
+            )}>
+              <MessageSquare className="w-3.5 h-3.5" />Chat
+            </button>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            {leftPanel === 'tasks'
+              ? <TaskSidebar onNewTask={handleNewTask} />
+              : <ChatPanel />
+            }
+          </div>
+        </div>
 
         <main className="flex-1 overflow-hidden flex flex-col">
           <AnimatePresence mode="wait">

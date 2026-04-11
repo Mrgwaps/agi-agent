@@ -118,6 +118,7 @@ export interface TaskState {
   completedAt?: string;
   totalCostUsd: number;
   error?: string;
+  result?: string;
   pendingApproval?: ApprovalRequest;
 }
 

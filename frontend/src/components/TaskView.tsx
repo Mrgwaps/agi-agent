@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import * as Tabs from '@radix-ui/react-tabs';
 import {
@@ -14,7 +14,9 @@ import {
   XCircle,
   Clock,
   AlertCircle,
+  FileText,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { useStore } from '@/lib/store';
 import { useTaskStream } from '@/hooks/useTaskStream';
 import { abortTask } from '@/lib/api';
@@ -45,6 +47,7 @@ const STATUS_CONFIG = {
 // ============================================================
 
 const TABS = [
+  { id: 'result', label: 'Result', icon: FileText },
   { id: 'plan', label: 'Plan', icon: BrainCircuit },
   { id: 'events', label: 'Events', icon: Activity },
   { id: 'tools', label: 'Tools', icon: Wrench },
@@ -68,6 +71,12 @@ export function TaskView({ taskId }: TaskViewProps) {
   const [aborting, setAborting] = useState(false);
 
   const { events, isConnected } = useTaskStream(taskId);
+
+  useEffect(() => {
+    if (task?.status === TaskStatus.COMPLETED && task?.result) {
+      setActiveTab('result');
+    }
+  }, [task?.status, task?.result]);
 
   if (!task) {
     return (
@@ -219,6 +228,27 @@ export function TaskView({ taskId }: TaskViewProps) {
         </Tabs.List>
 
         <div className="flex-1 overflow-hidden">
+          <Tabs.Content value="result" className="h-full overflow-y-auto p-4">
+            {task.result ? (
+              <div className="prose prose-invert prose-sm max-w-none text-text-muted
+                [&_h1]:text-text [&_h2]:text-text [&_h3]:text-text
+                [&_code]:font-mono [&_code]:text-accent [&_code]:bg-black/30 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded
+                [&_pre]:bg-black/30 [&_pre]:p-3 [&_pre]:rounded-xl
+                [&_a]:text-primary [&_strong]:text-text">
+                <ReactMarkdown>{task.result}</ReactMarkdown>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-32 gap-3 text-text-muted">
+                <FileText className="w-8 h-8 opacity-30" />
+                <p className="text-xs">
+                  {task.status === TaskStatus.COMPLETED ? 'Result is loading…' :
+                   task.status === TaskStatus.RUNNING || task.status === TaskStatus.PLANNING ? 'Task in progress…' :
+                   'No result yet.'}
+                </p>
+              </div>
+            )}
+          </Tabs.Content>
+
           <Tabs.Content
             value="plan"
             className="h-full overflow-y-auto p-4"

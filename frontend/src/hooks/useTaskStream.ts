@@ -56,32 +56,48 @@ export function useTaskStream(taskId: string | null): UseTaskStreamResult {
           });
           break;
 
-        case EventType.TASK_COMPLETED:
+        case EventType.TASK_COMPLETED: {
+          const resultPreview = event.payload.result as string | undefined;
           updateTask(taskId, {
             status: TaskStatus.COMPLETED,
             completedAt: event.timestamp,
+            ...(resultPreview ? { result: resultPreview } : {}),
           });
           setIsConnected(false);
-          addToast({
-            type: 'success',
-            title: 'Task completed',
-            message: 'The agent finished successfully.',
-          });
+          // Only show toast for fresh completions, not page-reload replays
+          const isReplayed = event.payload.replayed === true;
+          if (!isReplayed) {
+            addToast({
+              type: 'success',
+              title: 'Task completed',
+              message: 'The agent finished successfully.',
+            });
+          }
+          // Fetch the full result from the API (event only has 500-char preview)
+          import('@/lib/api').then(({ getTask }) =>
+            getTask(taskId).then((full) => {
+              if (full.result) updateTask(taskId, { result: full.result });
+            }).catch(() => {})
+          );
           break;
+        }
 
-        case EventType.TASK_FAILED:
+        case EventType.TASK_FAILED: {
           updateTask(taskId, {
             status: TaskStatus.FAILED,
             error: (event.payload.error as string) || 'Unknown error',
             completedAt: event.timestamp,
           });
           setIsConnected(false);
-          addToast({
-            type: 'error',
-            title: 'Task failed',
-            message: (event.payload.error as string) || 'The agent encountered an error.',
-          });
+          if (event.payload.replayed !== true) {
+            addToast({
+              type: 'error',
+              title: 'Task failed',
+              message: (event.payload.error as string) || 'The agent encountered an error.',
+            });
+          }
           break;
+        }
 
         case EventType.TASK_ABORTED:
           updateTask(taskId, {
