@@ -37,7 +37,13 @@ function normalizeTask(raw: any): TaskState {
     completedAt: raw.completedAt ?? raw.completed_at,
     totalCostUsd: raw.totalCostUsd ?? raw.total_cost_usd ?? 0,
     error: raw.error,
-    result: raw.result,
+    result: typeof raw.result === 'string'
+      ? raw.result
+      : raw.result != null
+        ? (typeof raw.result === 'object' && raw.result.result != null
+            ? String(raw.result.result)
+            : JSON.stringify(raw.result))
+        : undefined,
     pendingApproval: raw.pendingApproval ?? raw.pending_approval,
   };
 }

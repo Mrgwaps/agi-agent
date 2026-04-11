@@ -368,7 +368,13 @@ class OrchestratorGraph:
             and completed[0].tool_used in _self_contained_tools
             and completed[0].result
         ):
-            state.result = completed[0].result
+            raw = completed[0].result
+            # Tool results are dicts like {"success": True, "result": "...", ...}
+            # Extract the text string so state.result is always a str.
+            if isinstance(raw, dict):
+                state.result = raw.get("result") or raw.get("output") or str(raw)
+            else:
+                state.result = str(raw)
             logger.info("deliver_node: single llm_only step — using result directly")
         else:
             self._emit(self._event(
@@ -376,8 +382,15 @@ class OrchestratorGraph:
                 {"message": "Synthesizing final deliverable…"},
             ))
 
+            def _extract_result(r: Any) -> str:
+                if r is None:
+                    return ""
+                if isinstance(r, dict):
+                    return r.get("result") or r.get("output") or str(r)
+                return str(r)
+
             steps_context = "\n\n".join(
-                f"### Step {i}: {s.description}\n{str(s.result)[:1500]}"
+                f"### Step {i}: {s.description}\n{_extract_result(s.result)[:1500]}"
                 for i, s in enumerate(completed, 1)
                 if s.result
             )
@@ -417,7 +430,8 @@ class OrchestratorGraph:
         self._emit(self._event(
             EventType.task_completed,
             {
-                "result_preview": str(state.result)[:500],
+                "result": str(state.result)[:500] if state.result else "",
+                "result_preview": str(state.result)[:500] if state.result else "",
                 "total_cost_usd": state.total_cost_usd,
                 "steps_completed": len(completed),
                 "steps_failed": len(failed),
@@ -432,7 +446,12 @@ class OrchestratorGraph:
     def _summarize_results(self, steps: List[TaskStep], goal: str) -> str:
         parts = [f"Task: {goal}\n"]
         for i, step in enumerate(steps, 1):
-            result_str = str(step.result)[:300] if step.result else "(no output)"
+            if step.result is None:
+                result_str = "(no output)"
+            elif isinstance(step.result, dict):
+                result_str = (step.result.get("result") or str(step.result))[:300]
+            else:
+                result_str = str(step.result)[:300]
             parts.append(f"Step {i}: {step.description}\nResult: {result_str}\n")
         return "\n".join(parts)
 
