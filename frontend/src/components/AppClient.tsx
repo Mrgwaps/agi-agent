@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BrainCircuit, Settings, DollarSign, Activity, TrendingUp, Zap, MessageSquare, ListTodo } from 'lucide-react';
+import { BrainCircuit, Settings, DollarSign, Activity, TrendingUp, Zap, MessageSquare, ListTodo, Bot } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { TaskSidebar } from '@/components/TaskSidebar';
 import { ChatPanel } from '@/components/ChatPanel';
@@ -15,6 +15,7 @@ import { SettingsPanel } from '@/components/Settings';
 import { ModelIndicator } from '@/components/ModelIndicator';
 import { VoicePlayer } from '@/components/VoicePlayer';
 import { VoiceAvatar } from '@/components/VoiceAvatar';
+import { JarvisOverlay } from '@/components/JarvisOverlay';
 import { useHeartbeat } from '@/hooks/useHeartbeat';
 import { cn } from '@/lib/utils';
 
@@ -23,6 +24,7 @@ type RightPanel = 'cost' | 'earnings' | 'skills' | null;
 function Header({
   currentTaskId,
   onOpenSettings,
+  onOpenJarvis,
   rightPanel,
   setRightPanel,
   voicePlayerSlot,
@@ -30,6 +32,7 @@ function Header({
 }: {
   currentTaskId: string | null;
   onOpenSettings: () => void;
+  onOpenJarvis: () => void;
   rightPanel: RightPanel;
   setRightPanel: (p: RightPanel) => void;
   voicePlayerSlot?: React.ReactNode;
@@ -93,6 +96,15 @@ function Header({
         </button>
 
         <button
+          onClick={onOpenJarvis}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-text-muted hover:text-[rgb(0,212,255)] hover:bg-[rgb(0,212,255)]/10 transition-colors"
+          title="Activate JARVIS"
+        >
+          <Bot className="w-3.5 h-3.5" />
+          <span className="hidden sm:block">JARVIS</span>
+        </button>
+
+        <button
           onClick={onOpenSettings}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-text-muted hover:text-text hover:bg-surface-elevated transition-colors"
         >
@@ -110,6 +122,7 @@ export default function AppClient() {
   const settings = useStore((s) => s.settings);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [jarvisOpen, setJarvisOpen] = useState(false);
   const [rightPanel, setRightPanel] = useState<RightPanel>('cost');
   const [showNewTask, setShowNewTask] = useState(false);
   const [leftPanel, setLeftPanel] = useState<'tasks' | 'chat'>('tasks');
@@ -134,6 +147,7 @@ export default function AppClient() {
       <Header
         currentTaskId={currentTaskId}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenJarvis={() => setJarvisOpen(true)}
         rightPanel={rightPanel}
         setRightPanel={setRightPanel}
         voicePlayerSlot={
@@ -273,6 +287,7 @@ export default function AppClient() {
       </div>
 
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <JarvisOverlay open={jarvisOpen} onClose={() => setJarvisOpen(false)} />
     </div>
   );
 }

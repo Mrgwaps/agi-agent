@@ -23,6 +23,7 @@ import {
   Mail,
   CreditCard,
   Database,
+  Bot,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { testOllamaConnection, pushSettingsToBackend } from '@/lib/api';
@@ -254,6 +255,7 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
       heygenApiKey: local.heygenApiKey,
       agentMailApiKey: local.agentMailApiKey,
       ghostApiKey: local.ghostApiKey,
+      elevenLabsApiKey: local.elevenLabsApiKey,
       stripePublishableKey: local.stripePublishableKey,
       stripeWebhookSecret: local.stripeWebhookSecret,
     });
@@ -527,6 +529,27 @@ export function SettingsPanel({ open, onClose }: SettingsProps) {
                   description="Show a real-time HeyGen talking avatar in the interface"
                   value={local.avatarEnabled}
                   onChange={(v) => update('avatarEnabled', v)}
+                />
+              </Section>
+
+              {/* JARVIS */}
+              <Section title="JARVIS Voice Assistant" icon={Bot} defaultOpen={false}>
+                <p className="text-xs text-text-muted">
+                  Iron Man–style voice interface. Activate via the JARVIS button in the header. Speaks briefings and responds to voice commands using ElevenLabs TTS.
+                </p>
+                <SecretInput
+                  label="ElevenLabs API Key"
+                  value={local.elevenLabsApiKey}
+                  onChange={(v) => update('elevenLabsApiKey', v)}
+                  placeholder="sk-..."
+                  description="Required for the JARVIS voice. Get your key at elevenlabs.io"
+                />
+                <TextInput
+                  label="Voice ID"
+                  value={local.jarvisVoiceId}
+                  onChange={(v) => update('jarvisVoiceId', v)}
+                  placeholder="onwK4e9ZLuTAKqWW03F9"
+                  description="ElevenLabs voice ID. Default: Daniel — deep British male. Browse at elevenlabs.io/voice-library"
                 />
               </Section>
 
