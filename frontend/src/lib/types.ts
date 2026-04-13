@@ -229,6 +229,9 @@ export interface Settings {
   // Stripe
   stripePublishableKey: string;
   stripeWebhookSecret: string;
+  // JARVIS Voice Assistant
+  elevenLabsApiKey: string;
+  jarvisVoiceId: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -258,6 +261,8 @@ export const DEFAULT_SETTINGS: Settings = {
   ghostApiKey: '',
   stripePublishableKey: '',
   stripeWebhookSecret: '',
+  elevenLabsApiKey: '',
+  jarvisVoiceId: 'onwK4e9ZLuTAKqWW03F9',
 };
 
 // ============================================================

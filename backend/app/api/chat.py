@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -9,10 +9,17 @@ from app.services.openrouter import ModelQuality, openrouter_client
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful, knowledgeable AI assistant. "
+    "Answer questions clearly and concisely. "
+    "Use markdown formatting for code, lists, and structure when helpful."
+)
+
 
 class ChatRequest(BaseModel):
     message: str
     history: List[Dict[str, str]] = []
+    system: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -23,14 +30,11 @@ class ChatResponse(BaseModel):
 @router.post("", response_model=ChatResponse)
 async def chat(body: ChatRequest) -> Dict[str, Any]:
     """Direct chat with the AI — no task orchestration."""
+    system_prompt = body.system if body.system else DEFAULT_SYSTEM_PROMPT
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are a helpful, knowledgeable AI assistant. "
-                "Answer questions clearly and concisely. "
-                "Use markdown formatting for code, lists, and structure when helpful."
-            ),
+            "content": system_prompt,
         }
     ]
     # Add conversation history
