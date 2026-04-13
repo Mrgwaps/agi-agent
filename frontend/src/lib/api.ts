@@ -216,20 +216,48 @@ export function streamEvents(
   let closed = false;
   let retryTimeout: ReturnType<typeof setTimeout> | null = null;
   let eventSource: EventSource | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryCount = 0;
+  const MAX_RETRIES = 5;
+  const IDLE_TIMEOUT_MS = 120_000; // 120 s — reconnect if no events for 2 min
+  const RETRY_DELAYS = [3_000, 6_000, 12_000, 24_000, 48_000];
+
+  function resetIdleTimer() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (closed) return;
+      // No event received for IDLE_TIMEOUT_MS — reconnect
+      eventSource?.close();
+      eventSource = null;
+      if (retryCount < MAX_RETRIES) {
+        const delay = RETRY_DELAYS[Math.min(retryCount, RETRY_DELAYS.length - 1)];
+        retryCount++;
+        callbacks.onError(new Error(`Stream idle for ${IDLE_TIMEOUT_MS / 1000}s — reconnecting (attempt ${retryCount})`));
+        retryTimeout = setTimeout(connect, delay);
+      } else {
+        callbacks.onError(new Error('Stream idle timeout — max retries exceeded'));
+        callbacks.onClose();
+      }
+    }, IDLE_TIMEOUT_MS);
+  }
+
+  function handleEvent(ev: MessageEvent) {
+    resetIdleTimer(); // any event resets the idle clock
+    retryCount = 0;   // successful event resets retry counter
+    try {
+      const raw = JSON.parse(ev.data);
+      callbacks.onEvent(normalizeEvent(raw));
+    } catch {
+      // ignore malformed events
+    }
+  }
 
   function connect() {
     if (closed) return;
 
     eventSource = new EventSource(url);
 
-    eventSource.onmessage = (ev) => {
-      try {
-        const raw = JSON.parse(ev.data);
-        callbacks.onEvent(normalizeEvent(raw));
-      } catch {
-        // ignore malformed events
-      }
-    };
+    eventSource.onmessage = handleEvent;
 
     // Also listen on named events (sse_starlette sends event name separately)
     const eventNames = [
@@ -239,30 +267,35 @@ export function streamEvents(
       'approval_granted', 'approval_denied', 'error',
     ];
     for (const name of eventNames) {
-      eventSource.addEventListener(name, (ev: MessageEvent) => {
-        try {
-          const raw = JSON.parse(ev.data);
-          callbacks.onEvent(normalizeEvent(raw));
-        } catch {
-          // ignore malformed events
-        }
-      });
+      eventSource.addEventListener(name, handleEvent);
     }
 
     eventSource.onerror = () => {
       eventSource?.close();
       eventSource = null;
+      if (idleTimer) clearTimeout(idleTimer);
       if (!closed) {
-        callbacks.onError(new Error('SSE connection lost, retrying…'));
-        retryTimeout = setTimeout(connect, 3000);
+        if (retryCount < MAX_RETRIES) {
+          const delay = RETRY_DELAYS[Math.min(retryCount, RETRY_DELAYS.length - 1)];
+          retryCount++;
+          callbacks.onError(new Error(`SSE connection lost — reconnecting in ${delay / 1000}s (attempt ${retryCount})`));
+          retryTimeout = setTimeout(connect, delay);
+        } else {
+          callbacks.onError(new Error('SSE connection lost — max retries exceeded'));
+          callbacks.onClose();
+        }
       }
     };
 
     eventSource.addEventListener('close', () => {
+      if (idleTimer) clearTimeout(idleTimer);
       eventSource?.close();
       eventSource = null;
       callbacks.onClose();
     });
+
+    // Start idle watchdog once connected
+    resetIdleTimer();
   }
 
   connect();
@@ -271,6 +304,7 @@ export function streamEvents(
   return () => {
     closed = true;
     if (retryTimeout) clearTimeout(retryTimeout);
+    if (idleTimer) clearTimeout(idleTimer);
     eventSource?.close();
     eventSource = null;
   };
